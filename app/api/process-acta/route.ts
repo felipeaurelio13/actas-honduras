@@ -3,12 +3,21 @@ import OpenAI from "openai"
 
 export async function POST(request: NextRequest) {
   try {
+    console.log("[v0] Starting acta processing...")
+
+    if (!process.env.OPENAI_API_KEY) {
+      console.error("[v0] Missing OPENAI_API_KEY environment variable")
+      return NextResponse.json({ error: "Configuración de OpenAI faltante" }, { status: 500 })
+    }
+
     const formData = await request.formData()
     const file = formData.get("file") as File
 
     if (!file) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 })
     }
+
+    console.log("[v0] Processing file:", file.name, "Size:", file.size)
 
     // Convert file to buffer for processing
     const bytes = await file.arrayBuffer()
@@ -25,30 +34,44 @@ export async function POST(request: NextRequest) {
       openai_document_error: null,
     }
 
+    console.log("[v0] Starting parallel processing with 3 OpenAI agents...")
+
     const [openaiVisionResult, openaiOCRResult, openaiDocumentResult] = await Promise.allSettled([
       processWithOpenAI(buffer, file.name, "OPENAI_VISION"),
       processWithOpenAI(buffer, file.name, "OPENAI_OCR"),
       processWithOpenAI(buffer, file.name, "OPENAI_DOCUMENT"),
     ])
 
+    console.log("[v0] Processing results:", {
+      vision: openaiVisionResult.status,
+      ocr: openaiOCRResult.status,
+      document: openaiDocumentResult.status,
+    })
+
     // Handle OpenAI Vision Agent results
     if (openaiVisionResult.status === "fulfilled") {
       results.openai_vision = openaiVisionResult.value
+      console.log("[v0] OpenAI Vision successful")
     } else {
+      console.error("[v0] OpenAI Vision failed:", openaiVisionResult.reason)
       results.openai_vision_error = openaiVisionResult.reason?.message || "Error en agente OpenAI Vision"
     }
 
     // Handle OpenAI OCR Agent results
     if (openaiOCRResult.status === "fulfilled") {
       results.openai_ocr = openaiOCRResult.value
+      console.log("[v0] OpenAI OCR successful")
     } else {
+      console.error("[v0] OpenAI OCR failed:", openaiOCRResult.reason)
       results.openai_ocr_error = openaiOCRResult.reason?.message || "Error en agente OpenAI OCR"
     }
 
     // Handle OpenAI Document Agent results
     if (openaiDocumentResult.status === "fulfilled") {
       results.openai_document = openaiDocumentResult.value
+      console.log("[v0] OpenAI Document successful")
     } else {
+      console.error("[v0] OpenAI Document failed:", openaiDocumentResult.reason)
       results.openai_document_error = openaiDocumentResult.reason?.message || "Error en agente OpenAI Document"
     }
 
@@ -56,24 +79,39 @@ export async function POST(request: NextRequest) {
     const successfulResults = [results.openai_vision, results.openai_ocr, results.openai_document].filter(
       (r) => r !== null,
     )
+
+    console.log("[v0] Successful agents:", successfulResults.length)
+
     if (successfulResults.length >= 2) {
       results.consensus = generateConsensus(results.openai_vision, results.openai_ocr, results.openai_document)
+      console.log("[v0] Consensus generated successfully")
+    } else {
+      console.log("[v0] Not enough successful results for consensus")
     }
 
     return NextResponse.json(results)
   } catch (error) {
-    console.error("Processing error:", error)
+    console.error("[v0] Processing error:", error)
     return NextResponse.json({ error: "Error interno del servidor" }, { status: 500 })
   }
 }
 
 async function processWithOpenAI(buffer: Buffer, filename: string, agentType = "OPENAI_VISION") {
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  try {
+    console.log(`[v0] Starting ${agentType} processing...`)
 
-  const base64Image = buffer.toString("base64")
+    const apiKey = process.env.OPENAI_API_KEY
+    if (!apiKey) {
+      throw new Error("OPENAI_API_KEY no configurada")
+    }
 
-  const prompts = {
-    OPENAI_VISION: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando análisis visual avanzado.
+    const client = new OpenAI({ apiKey })
+    const base64Image = buffer.toString("base64")
+
+    console.log(`[v0] ${agentType} - Image converted to base64, length:`, base64Image.length)
+
+    const prompts = {
+      OPENAI_VISION: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando análisis visual avanzado.
 
 ENFOQUE: Análisis visual detallado de la imagen
 INSTRUCCIONES CRÍTICAS:
@@ -83,7 +121,7 @@ INSTRUCCIONES CRÍTICAS:
 4. Los votos deben ser números enteros exactos que veas en la imagen
 5. Prioriza la claridad visual de los números`,
 
-    OPENAI_OCR: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando técnicas de OCR.
+      OPENAI_OCR: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando técnicas de OCR.
 
 ENFOQUE: Reconocimiento óptico de caracteres y texto estructurado
 INSTRUCCIONES CRÍTICAS:
@@ -93,7 +131,7 @@ INSTRUCCIONES CRÍTICAS:
 4. Valida que los números extraídos sean coherentes
 5. Si hay ambigüedad en OCR, usa null`,
 
-    OPENAI_DOCUMENT: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando análisis de documentos estructurados.
+      OPENAI_DOCUMENT: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando análisis de documentos estructurados.
 
 ENFOQUE: Comprensión de estructura documental y layout
 INSTRUCCIONES CRÍTICAS:
@@ -102,19 +140,21 @@ INSTRUCCIONES CRÍTICAS:
 3. Busca específicamente partidos políticos hondureños: Partido Nacional, Partido Liberal, LIBRE, PSH, etc.
 4. Valida coherencia entre sumas parciales y totales
 5. Considera el formato estándar de actas electorales hondureñas`,
-  }
+    }
 
-  const selectedPrompt = prompts[agentType as keyof typeof prompts] || prompts.OPENAI_VISION
+    const selectedPrompt = prompts[agentType as keyof typeof prompts] || prompts.OPENAI_VISION
 
-  const response = await client.chat.completions.create({
-    model: process.env.OPENAI_VISION_MODEL || "gpt-4o",
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: `${selectedPrompt}
+    console.log(`[v0] ${agentType} - Making OpenAI API call...`)
+
+    const response = await client.chat.completions.create({
+      model: process.env.OPENAI_VISION_MODEL || "gpt-4o",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `${selectedPrompt}
 
 Estructura JSON requerida:
 {
@@ -139,65 +179,76 @@ Estructura JSON requerida:
 }
 
 IMPORTANTE: Solo incluye partidos que realmente veas con votos claramente legibles.`,
-          },
-          {
-            type: "image_url",
-            image_url: {
-              url: `data:image/jpeg;base64,${base64Image}`,
             },
-          },
-        ],
-      },
-    ],
-    max_tokens: 1500,
-    temperature: agentType === "OPENAI_VISION" ? 0 : 0.1, // Slight variation for different agents
-  })
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/jpeg;base64,${base64Image}`,
+              },
+            },
+          ],
+        },
+      ],
+      max_tokens: 1500,
+      temperature: agentType === "OPENAI_VISION" ? 0 : 0.1, // Slight variation for different agents
+    })
 
-  const content = response.choices[0].message.content
-  let parsedResult
+    console.log(`[v0] ${agentType} - OpenAI API response received`)
 
-  try {
-    parsedResult = JSON.parse(content || "{}")
-  } catch {
-    console.error(`Failed to parse ${agentType} response:`, content)
-    parsedResult = {
-      header: { departamento: null, municipio: null, centro_votacion: null, jrv: null, codigo_acta: null },
-      resultados: { partidos: [], totales: { validos: null, nulos: null, blancos: null, total_sumado: null } },
+    const content = response.choices[0].message.content
+    let parsedResult
+
+    try {
+      parsedResult = JSON.parse(content || "{}")
+      console.log(`[v0] ${agentType} - JSON parsed successfully`)
+    } catch (parseError) {
+      console.error(`[v0] ${agentType} - Failed to parse JSON:`, content)
+      console.error(`[v0] ${agentType} - Parse error:`, parseError)
+      parsedResult = {
+        header: { departamento: null, municipio: null, centro_votacion: null, jrv: null, codigo_acta: null },
+        resultados: { partidos: [], totales: { validos: null, nulos: null, blancos: null, total_sumado: null } },
+      }
     }
-  }
 
-  const validatedResult = validateAndCleanResult(parsedResult)
+    const validatedResult = validateAndCleanResult(parsedResult)
 
-  const agentNames = {
-    OPENAI_VISION: "OPENAI_VISION",
-    OPENAI_OCR: "OPENAI_OCR",
-    OPENAI_DOCUMENT: "OPENAI_DOCUMENT",
-  }
+    const agentNames = {
+      OPENAI_VISION: "OPENAI_VISION",
+      OPENAI_OCR: "OPENAI_OCR",
+      OPENAI_DOCUMENT: "OPENAI_DOCUMENT",
+    }
 
-  const confidenceLevels = {
-    OPENAI_VISION: 0.85,
-    OPENAI_OCR: 0.8,
-    OPENAI_DOCUMENT: 0.82,
-  }
+    const confidenceLevels = {
+      OPENAI_VISION: 0.85,
+      OPENAI_OCR: 0.8,
+      OPENAI_DOCUMENT: 0.82,
+    }
 
-  return {
-    meta: {
-      nivel: "Diputados",
-      pais: "Honduras",
-      fuente: filename,
-      timestamp_procesamiento: new Date().toISOString(),
-      version_schema: "1.1.0",
-      agente: agentNames[agentType as keyof typeof agentNames] || "OPENAI",
-      confianza_global: confidenceLevels[agentType as keyof typeof confidenceLevels] || 0.85,
-    },
-    header: validatedResult.header,
-    resultados: validatedResult.resultados,
-    verificaciones: {
-      suma_partidos_igual_validos: calculateVerifications(validatedResult),
-      suma_global_coherente: null,
-      campos_firma_presentes: null,
-    },
-    observaciones: null,
+    const result = {
+      meta: {
+        nivel: "Diputados",
+        pais: "Honduras",
+        fuente: filename,
+        timestamp_procesamiento: new Date().toISOString(),
+        version_schema: "1.1.0",
+        agente: agentNames[agentType as keyof typeof agentNames] || "OPENAI",
+        confianza_global: confidenceLevels[agentType as keyof typeof confidenceLevels] || 0.85,
+      },
+      header: validatedResult.header,
+      resultados: validatedResult.resultados,
+      verificaciones: {
+        suma_partidos_igual_validos: calculateVerifications(validatedResult),
+        suma_global_coherente: null,
+        campos_firma_presentes: null,
+      },
+      observaciones: null,
+    }
+
+    console.log(`[v0] ${agentType} - Processing completed successfully`)
+    return result
+  } catch (error) {
+    console.error(`[v0] ${agentType} - Processing failed:`, error)
+    throw error
   }
 }
 
