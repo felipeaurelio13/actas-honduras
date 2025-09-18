@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server"
+import OpenAI from "openai"
 
 export async function POST(request: NextRequest) {
   try {
@@ -77,7 +78,6 @@ export async function POST(request: NextRequest) {
 }
 
 async function processWithOpenAI(buffer: Buffer, filename: string) {
-  const OpenAI = require("openai")
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
   const base64Image = buffer.toString("base64")
@@ -129,7 +129,7 @@ async function processWithOpenAI(buffer: Buffer, filename: string) {
   let parsedResult
 
   try {
-    parsedResult = JSON.parse(content)
+    parsedResult = JSON.parse(content || "{}")
   } catch {
     // If JSON parsing fails, create a basic structure
     parsedResult = {
