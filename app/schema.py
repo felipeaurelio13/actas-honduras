@@ -30,7 +30,7 @@ class Meta(BaseModel):
     pais: str = "Honduras"
     fuente: str
     timestamp_procesamiento: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
-    version_schema: str = "1.1.0"
+    version_schema: str = "1.1.1"
     agente: str
     confianza_global: float = 0.0
 

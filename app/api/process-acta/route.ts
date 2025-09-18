@@ -1,292 +1,504 @@
 import { type NextRequest, NextResponse } from "next/server"
 import OpenAI from "openai"
 
+export const runtime = "nodejs"
+
+const AGENT_PIPELINES = ["openai_vision", "openai_ocr", "openai_document"] as const
+
+const SCHEMA_VERSION = "1.1.1"
+
+type AgentPipeline = (typeof AGENT_PIPELINES)[number]
+type AgentErrorKey = `${AgentPipeline}_error`
+
+type NullableString = string | null
+
+type Header = {
+  departamento: NullableString
+  municipio: NullableString
+  centro_votacion: NullableString
+  jrv: NullableString
+  codigo_acta: NullableString
+}
+
+type Totales = {
+  validos: number | null
+  nulos: number | null
+  blancos: number | null
+  total_sumado: number | null
+}
+
+type Partido = {
+  nombre: string
+  votos: number | null
+}
+
+type LimpiadorActa = {
+  header: Header
+  resultados: {
+    partidos: Partido[]
+    totales: Totales
+    tablas_brutas: string[][]
+  }
+}
+
+type Verificaciones = {
+  suma_partidos_igual_validos: boolean | null
+  suma_global_coherente: boolean | null
+  campos_firma_presentes: boolean | null
+}
+
+export type ActaPayload = {
+  meta: {
+    nivel: string
+    pais: string
+    fuente: string
+    timestamp_procesamiento: string
+    version_schema: string
+    agente: string
+    confianza_global: number
+  }
+  header: Header
+  resultados: {
+    partidos: Partido[]
+    totales: Totales
+    tablas_brutas: string[][]
+  }
+  verificaciones: Verificaciones
+  observaciones: string | null
+}
+
+type ApiResponsePayload = Record<AgentPipeline, ActaPayload | null> &
+  Record<AgentErrorKey, string | null> & { consensus: ActaPayload | null }
+
+const OPENAI_ACTA_SCHEMA = {
+  name: "ActaDiputados",
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      header: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          departamento: { type: ["string", "null"] },
+          municipio: { type: ["string", "null"] },
+          centro_votacion: { type: ["string", "null"] },
+          jrv: { type: ["string", "null"] },
+          codigo_acta: { type: ["string", "null"] },
+        },
+        required: ["departamento", "municipio", "centro_votacion", "jrv", "codigo_acta"],
+      },
+      resultados: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          partidos: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                nombre: { type: "string" },
+                votos: { type: ["integer", "null"] },
+              },
+              required: ["nombre", "votos"],
+            },
+          },
+          totales: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              validos: { type: ["integer", "null"] },
+              nulos: { type: ["integer", "null"] },
+              blancos: { type: ["integer", "null"] },
+              total_sumado: { type: ["integer", "null"] },
+            },
+            required: ["validos", "nulos", "blancos", "total_sumado"],
+          },
+          tablas_brutas: {
+            type: "array",
+            items: {
+              type: "array",
+              items: { type: "string" },
+            },
+          },
+        },
+        required: ["partidos", "totales", "tablas_brutas"],
+      },
+    },
+    required: ["header", "resultados"],
+  },
+  strict: true,
+} as const
+
+const DEFAULT_MODEL = process.env.OPENAI_DEFAULT_MODEL ?? "gpt-4.1"
+
+const AGENT_CONFIGS: Record<AgentPipeline, { name: string; prompt: string; temperature: number; modelEnv?: string; confidence: number }> = {
+  openai_vision: {
+    name: "OPENAI_VISION",
+    temperature: 0,
+    confidence: 0.85,
+    modelEnv: "OPENAI_VISION_MODEL",
+    prompt:
+      "Eres un perito electoral hondureño especializado en inspección visual detallada de actas de cierre de DIPUTADOS. Transcribe únicamente lo que ves de forma legible. Si algún campo es dudoso o ilegible, responde null. Respeta nombres de partidos tal como aparecen y evita inferencias.",
+  },
+  openai_ocr: {
+    name: "OPENAI_OCR",
+    temperature: 0.1,
+    confidence: 0.8,
+    modelEnv: "OPENAI_OCR_MODEL",
+    prompt:
+      "Eres un motor OCR experto en actas hondureñas de DIPUTADOS. Extrae texto sistemáticamente línea por línea, detecta patrones de partidos y números y devuelve null cuando un dato no está claro. Nunca inventes cifras.",
+  },
+  openai_document: {
+    name: "OPENAI_DOCUMENT",
+    temperature: 0.05,
+    confidence: 0.82,
+    modelEnv: "OPENAI_DOCUMENT_MODEL",
+    prompt:
+      "Eres un analista documental hondureño. Comprende la estructura del acta (encabezado, tabla de partidos y totales) y extrae los datos manteniendo su formato exacto. Usa null cuando algún dato no pueda confirmarse visualmente.",
+  },
+}
+
 export async function POST(request: NextRequest) {
   try {
-    console.log("[v0] Starting acta processing...")
-
-    if (!process.env.OPENAI_API_KEY) {
-      console.error("[v0] Missing OPENAI_API_KEY environment variable")
+    const apiKey = process.env.OPENAI_API_KEY
+    if (!apiKey) {
       return NextResponse.json({ error: "Configuración de OpenAI faltante" }, { status: 500 })
     }
 
     const formData = await request.formData()
-    const file = formData.get("file") as File
-
-    if (!file) {
-      return NextResponse.json({ error: "No file provided" }, { status: 400 })
+    const file = formData.get("file")
+    if (!(file instanceof File)) {
+      return NextResponse.json({ error: "No se recibió archivo" }, { status: 400 })
     }
 
-    console.log("[v0] Processing file:", file.name, "Size:", file.size)
+    const buffer = Buffer.from(await file.arrayBuffer())
+    const base64Image = buffer.toString("base64")
 
-    // Convert file to buffer for processing
-    const bytes = await file.arrayBuffer()
-    const buffer = Buffer.from(bytes)
+    console.log(`[process-acta] Procesando ${file.name} (${file.size} bytes) con ${AGENT_PIPELINES.length} agentes`)
 
-    // Initialize results
-    const results: any = {
-      openai_vision: null,
-      openai_ocr: null,
-      openai_document: null,
-      consensus: null,
-      openai_vision_error: null,
-      openai_ocr_error: null,
-      openai_document_error: null,
-    }
+    const client = new OpenAI({ apiKey })
+    const tasks = AGENT_PIPELINES.map((pipeline) =>
+      processWithOpenAI(client, base64Image, file.name, pipeline),
+    )
+    const settled = await Promise.allSettled(tasks)
 
-    console.log("[v0] Starting parallel processing with 3 OpenAI agents...")
+    const payload = createBaseResponse()
 
-    const [openaiVisionResult, openaiOCRResult, openaiDocumentResult] = await Promise.allSettled([
-      processWithOpenAI(buffer, file.name, "OPENAI_VISION"),
-      processWithOpenAI(buffer, file.name, "OPENAI_OCR"),
-      processWithOpenAI(buffer, file.name, "OPENAI_DOCUMENT"),
-    ])
-
-    console.log("[v0] Processing results:", {
-      vision: openaiVisionResult.status,
-      ocr: openaiOCRResult.status,
-      document: openaiDocumentResult.status,
+    settled.forEach((result, index) => {
+      const key = AGENT_PIPELINES[index]
+      if (result.status === "fulfilled") {
+        payload[key] = result.value
+      } else {
+        const errorMessage = toErrorMessage(result.reason)
+        payload[`${key}_error` as AgentErrorKey] = errorMessage
+        console.error(`[process-acta] ${key} falló: ${errorMessage}`)
+      }
     })
 
-    // Handle OpenAI Vision Agent results
-    if (openaiVisionResult.status === "fulfilled") {
-      results.openai_vision = openaiVisionResult.value
-      console.log("[v0] OpenAI Vision successful")
-    } else {
-      console.error("[v0] OpenAI Vision failed:", openaiVisionResult.reason)
-      results.openai_vision_error = openaiVisionResult.reason?.message || "Error en agente OpenAI Vision"
+    const successCount = AGENT_PIPELINES.filter((key) => payload[key]).length
+    console.log(`[process-acta] Agentes exitosos: ${successCount}`)
+
+    if (successCount >= 2) {
+      const consensus = generateConsensus(payload)
+      if (consensus) {
+        payload.consensus = consensus
+      }
     }
 
-    // Handle OpenAI OCR Agent results
-    if (openaiOCRResult.status === "fulfilled") {
-      results.openai_ocr = openaiOCRResult.value
-      console.log("[v0] OpenAI OCR successful")
-    } else {
-      console.error("[v0] OpenAI OCR failed:", openaiOCRResult.reason)
-      results.openai_ocr_error = openaiOCRResult.reason?.message || "Error en agente OpenAI OCR"
-    }
-
-    // Handle OpenAI Document Agent results
-    if (openaiDocumentResult.status === "fulfilled") {
-      results.openai_document = openaiDocumentResult.value
-      console.log("[v0] OpenAI Document successful")
-    } else {
-      console.error("[v0] OpenAI Document failed:", openaiDocumentResult.reason)
-      results.openai_document_error = openaiDocumentResult.reason?.message || "Error en agente OpenAI Document"
-    }
-
-    // Generate consensus if we have at least 2 successful results
-    const successfulResults = [results.openai_vision, results.openai_ocr, results.openai_document].filter(
-      (r) => r !== null,
-    )
-
-    console.log("[v0] Successful agents:", successfulResults.length)
-
-    if (successfulResults.length >= 2) {
-      results.consensus = generateConsensus(results.openai_vision, results.openai_ocr, results.openai_document)
-      console.log("[v0] Consensus generated successfully")
-    } else {
-      console.log("[v0] Not enough successful results for consensus")
-    }
-
-    return NextResponse.json(results)
+    return NextResponse.json(payload)
   } catch (error) {
-    console.error("[v0] Processing error:", error)
+    console.error("[process-acta] Error inesperado:", error)
     return NextResponse.json({ error: "Error interno del servidor" }, { status: 500 })
   }
 }
 
-async function processWithOpenAI(buffer: Buffer, filename: string, agentType = "OPENAI_VISION") {
+function createBaseResponse(): ApiResponsePayload {
+  return {
+    openai_vision: null,
+    openai_vision_error: null,
+    openai_ocr: null,
+    openai_ocr_error: null,
+    openai_document: null,
+    openai_document_error: null,
+    consensus: null,
+  } as ApiResponsePayload
+}
+
+function resolveModel(agentKey: AgentPipeline): string {
+  const config = AGENT_CONFIGS[agentKey]
+  if (config.modelEnv) {
+    const envModel = process.env[config.modelEnv]
+    if (envModel) {
+      return envModel
+    }
+  }
+  return DEFAULT_MODEL
+}
+
+async function processWithOpenAI(
+  client: OpenAI,
+  base64Image: string,
+  filename: string,
+  agentKey: AgentPipeline,
+): Promise<ActaPayload> {
+  const config = AGENT_CONFIGS[agentKey]
+  const model = resolveModel(agentKey)
+
   try {
-    console.log(`[v0] Starting ${agentType} processing...`)
-
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) {
-      throw new Error("OPENAI_API_KEY no configurada")
-    }
-
-    const client = new OpenAI({ apiKey })
-    const base64Image = buffer.toString("base64")
-
-    console.log(`[v0] ${agentType} - Image converted to base64, length:`, base64Image.length)
-
-    const prompts = {
-      OPENAI_VISION: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando análisis visual avanzado.
-
-ENFOQUE: Análisis visual detallado de la imagen
-INSTRUCCIONES CRÍTICAS:
-1. Lee EXACTAMENTE lo que ves en la imagen - NO inventes ni adivines números
-2. Si un número no es claramente legible, usa null
-3. Busca específicamente partidos políticos hondureños como: Partido Nacional, Partido Liberal, LIBRE, PSH, etc.
-4. Los votos deben ser números enteros exactos que veas en la imagen
-5. Prioriza la claridad visual de los números`,
-
-      OPENAI_OCR: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando técnicas de OCR.
-
-ENFOQUE: Reconocimiento óptico de caracteres y texto estructurado
-INSTRUCCIONES CRÍTICAS:
-1. Extrae texto de manera sistemática línea por línea
-2. Identifica patrones de texto que indican nombres de partidos y números
-3. Busca específicamente partidos políticos hondureños: Partido Nacional, Partido Liberal, LIBRE, PSH, etc.
-4. Valida que los números extraídos sean coherentes
-5. Si hay ambigüedad en OCR, usa null`,
-
-      OPENAI_DOCUMENT: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando análisis de documentos estructurados.
-
-ENFOQUE: Comprensión de estructura documental y layout
-INSTRUCCIONES CRÍTICAS:
-1. Analiza la estructura del documento electoral hondureño
-2. Identifica secciones: encabezado, tabla de partidos, totales
-3. Busca específicamente partidos políticos hondureños: Partido Nacional, Partido Liberal, LIBRE, PSH, etc.
-4. Valida coherencia entre sumas parciales y totales
-5. Considera el formato estándar de actas electorales hondureñas`,
-    }
-
-    const selectedPrompt = prompts[agentType as keyof typeof prompts] || prompts.OPENAI_VISION
-
-    console.log(`[v0] ${agentType} - Making OpenAI API call...`)
-
-    const models = ["gpt-4o", "gpt-4-vision-preview", "gpt-4-turbo"]
-    let response
-    let lastError
-
-    for (const model of models) {
-      try {
-        console.log(`[v0] ${agentType} - Trying model: ${model}`)
-        response = await client.chat.completions.create({
-          model: model,
-          messages: [
+    const response = await client.responses.create({
+      model,
+      input: [
+        {
+          role: "user",
+          content: [
             {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text: `${selectedPrompt}\n\nEstructura JSON requerida:\n{\n  "header": {\n    "departamento": "string exacto del documento o null",\n    "municipio": "string exacto del documento o null", \n    "centro_votacion": "string exacto del documento o null",\n    "jrv": "string exacto del documento o null",\n    "codigo_acta": "string exacto del documento o null"\n  },\n  "resultados": {\n    "partidos": [\n      {"nombre": "Nombre exacto del partido", "votos": número_exacto_visible}\n    ],\n    "totales": {\n      "validos": número_total_votos_válidos,\n      "nulos": número_votos_nulos, \n      "blancos": número_votos_blancos,\n      "total_sumado": número_total_general\n    }\n  }\n}\n\nIMPORTANTE: Solo incluye partidos que realmente veas con votos claramente legibles.`,
-                },
-                {
-                  type: "image_url",
-                  image_url: {
-                    url: `data:image/jpeg;base64,${base64Image}`,
-                  },
-                },
-              ],
+              type: "input_text",
+              text: `${config.prompt}\n\nDevuelve un JSON válido que cumpla el siguiente esquema. Si un dato no se ve claro, usa null.`,
+            },
+            {
+              type: "input_image",
+              image_base64: base64Image,
             },
           ],
-          max_tokens: 1500,
-          temperature: agentType === "OPENAI_VISION" ? 0 : 0.1, // Slight variation for different agents
-        })
-        console.log(`[v0] ${agentType} - Success with model: ${model}`)
-        break
-      } catch (error: any) {
-        console.error(`[v0] ${agentType} - Model ${model} failed:`, error.message)
-        lastError = error
-        continue
-      }
-    }
+        },
+      ],
+      response_format: {
+        type: "json_schema",
+        json_schema: OPENAI_ACTA_SCHEMA,
+      },
+      temperature: config.temperature,
+      max_output_tokens: 1800,
+    })
 
-    if (!response) {
-      throw lastError || new Error("Todos los modelos fallaron")
-    }
+    const text = extractResponseText(response)
+    const parsed = JSON.parse(text)
+    const cleaned = validateAndCleanResult(parsed)
+    const verificaciones = buildVerificaciones(cleaned)
 
-    console.log(`[v0] ${agentType} - OpenAI API response received`)
-
-    const content = response.choices[0].message.content
-    let parsedResult
-
-    try {
-      parsedResult = JSON.parse(content || "{}")
-      console.log(`[v0] ${agentType} - JSON parsed successfully`)
-    } catch (parseError) {
-      console.error(`[v0] ${agentType} - Failed to parse JSON:`, content)
-      console.error(`[v0] ${agentType} - Parse error:`, parseError)
-      parsedResult = {
-        header: { departamento: null, municipio: null, centro_votacion: null, jrv: null, codigo_acta: null },
-        resultados: { partidos: [], totales: { validos: null, nulos: null, blancos: null, total_sumado: null } },
-      }
-    }
-
-    const validatedResult = validateAndCleanResult(parsedResult)
-
-    const agentNames = {
-      OPENAI_VISION: "OPENAI_VISION",
-      OPENAI_OCR: "OPENAI_OCR",
-      OPENAI_DOCUMENT: "OPENAI_DOCUMENT",
-    }
-
-    const confidenceLevels = {
-      OPENAI_VISION: 0.85,
-      OPENAI_OCR: 0.8,
-      OPENAI_DOCUMENT: 0.82,
-    }
-
-    const result = {
+    return {
       meta: {
         nivel: "Diputados",
         pais: "Honduras",
         fuente: filename,
         timestamp_procesamiento: new Date().toISOString(),
-        version_schema: "1.1.0",
-        agente: agentNames[agentType as keyof typeof agentNames] || "OPENAI",
-        confianza_global: confidenceLevels[agentType as keyof typeof confidenceLevels] || 0.85,
+        version_schema: SCHEMA_VERSION,
+        agente: config.name,
+        confianza_global: config.confidence,
       },
-      header: validatedResult.header,
-      resultados: validatedResult.resultados,
-      verificaciones: {
-        suma_partidos_igual_validos: calculateVerifications(validatedResult),
-        suma_global_coherente: null,
-        campos_firma_presentes: null,
-      },
+      header: cleaned.header,
+      resultados: cleaned.resultados,
+      verificaciones,
       observaciones: null,
     }
-
-    console.log(`[v0] ${agentType} - Processing completed successfully`)
-    return result
   } catch (error) {
-    console.error(`[v0] ${agentType} - Processing failed:`, error)
-    throw error
+    throw new Error(`${config.name}: ${toErrorMessage(error)}`)
   }
 }
 
-function generateConsensus(openaiVision: any, openaiOCR: any, openaiDocument: any) {
-  const agents = [openaiVision, openaiOCR, openaiDocument].filter((a) => a !== null)
-
-  if (agents.length < 2) return null
-
-  const header: any = {}
-  const headerFields = ["departamento", "municipio", "centro_votacion", "jrv", "codigo_acta"]
-
-  for (const field of headerFields) {
-    const values = agents.map((a) => a.header?.[field]).filter((v) => v !== null && v !== undefined)
-    header[field] = getMajorityValue(values)
+function extractResponseText(response: unknown): string {
+  const outputText = (response as any)?.output_text
+  if (typeof outputText === "string" && outputText.trim().length > 0) {
+    return outputText
   }
 
-  const allParties: any = {}
-  agents.forEach((agent) => {
-    if (agent.resultados?.partidos) {
-      agent.resultados.partidos.forEach((partido: any) => {
-        const name = partido.nombre?.trim()
-        if (name && typeof partido.votos === "number") {
-          if (!allParties[name]) allParties[name] = []
-          allParties[name].push(partido.votos)
-        }
-      })
+  if (Array.isArray(outputText)) {
+    const text = outputText.join("\n").trim()
+    if (text.length > 0) {
+      return text
     }
-  })
-
-  const partidos = Object.entries(allParties)
-    .map(([nombre, votos]: [string, any]) => ({
-      nombre,
-      votos: getMajorityNumber(votos),
-    }))
-    .filter((p) => p.votos !== null)
-
-  const totales: any = {}
-  const totalFields = ["validos", "nulos", "blancos", "total_sumado"]
-
-  for (const field of totalFields) {
-    const values = agents.map((a) => a.resultados?.totales?.[field]).filter((v) => typeof v === "number")
-    totales[field] = getMajorityNumber(values)
   }
+
+  const outputItems = (response as any)?.output
+  if (Array.isArray(outputItems)) {
+    for (const item of outputItems) {
+      const content = item?.content
+      if (Array.isArray(content)) {
+        for (const chunk of content) {
+          if (typeof chunk?.text === "string" && chunk.text.trim().length > 0) {
+            return chunk.text
+          }
+        }
+      }
+    }
+  }
+
+  throw new Error("La respuesta de OpenAI no contiene JSON legible")
+}
+
+function sanitizeText(value: unknown): string | null {
+  if (typeof value !== "string") return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function toInt(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const int = Math.round(value)
+    return int >= 0 ? int : null
+  }
+  if (typeof value === "string") {
+    const numeric = value.replace(/[^0-9]/g, "")
+    if (!numeric) return null
+    const int = Number.parseInt(numeric, 10)
+    return Number.isFinite(int) ? int : null
+  }
+  return null
+}
+
+function sanitizeTable(table: unknown): string[] {
+  if (!Array.isArray(table)) return []
+  return table.map((cell) => (typeof cell === "string" ? cell.trim() : ""))
+}
+
+function validateAndCleanResult(raw: any): LimpiadorActa {
+  const header: Header = {
+    departamento: sanitizeText(raw?.header?.departamento),
+    municipio: sanitizeText(raw?.header?.municipio),
+    centro_votacion: sanitizeText(raw?.header?.centro_votacion),
+    jrv: sanitizeText(raw?.header?.jrv),
+    codigo_acta: sanitizeText(raw?.header?.codigo_acta),
+  }
+
+  const partidos: Partido[] = Array.isArray(raw?.resultados?.partidos)
+    ? raw.resultados.partidos
+        .map((partido: any) => {
+          const nombre = sanitizeText(partido?.nombre)
+          if (!nombre) return null
+          return {
+            nombre,
+            votos: toInt(partido?.votos),
+          }
+        })
+        .filter((partido: Partido | null): partido is Partido => partido !== null)
+    : []
+
+  const totales: Totales = {
+    validos: toInt(raw?.resultados?.totales?.validos),
+    nulos: toInt(raw?.resultados?.totales?.nulos),
+    blancos: toInt(raw?.resultados?.totales?.blancos),
+    total_sumado: toInt(raw?.resultados?.totales?.total_sumado),
+  }
+
+  if (
+    totales.total_sumado === null &&
+    typeof totales.validos === "number" &&
+    typeof totales.nulos === "number" &&
+    typeof totales.blancos === "number"
+  ) {
+    totales.total_sumado = totales.validos + totales.nulos + totales.blancos
+  }
+
+  const tablas_brutas: string[][] = Array.isArray(raw?.resultados?.tablas_brutas)
+    ? raw.resultados.tablas_brutas
+        .map((row: unknown) => sanitizeTable(row))
+        .filter((row: string[]) => row.some((cell) => cell.length > 0))
+    : []
+
+  return {
+    header,
+    resultados: {
+      partidos,
+      totales,
+      tablas_brutas,
+    },
+  }
+}
+
+function buildVerificaciones(data: LimpiadorActa): Verificaciones {
+  const votosValidos = data.resultados.partidos
+    .map((partido) => partido.votos)
+    .filter((votos): votos is number => typeof votos === "number")
+
+  const sumPartidos = votosValidos.reduce((acc, votos) => acc + votos, 0)
+  const validos = data.resultados.totales.validos
+  const sumaPartidosIgualValidos =
+    votosValidos.length > 0 && typeof validos === "number" ? sumPartidos === validos : null
+
+  const { nulos, blancos, total_sumado } = data.resultados.totales
+  const sumaGlobalCoherente =
+    typeof validos === "number" &&
+    typeof nulos === "number" &&
+    typeof blancos === "number" &&
+    typeof total_sumado === "number"
+      ? validos + nulos + blancos === total_sumado
+      : null
+
+  return {
+    suma_partidos_igual_validos: sumaPartidosIgualValidos,
+    suma_global_coherente: sumaGlobalCoherente,
+    campos_firma_presentes: null,
+  }
+}
+
+function generateConsensus(payload: ApiResponsePayload): ActaPayload | null {
+  const participantes = AGENT_PIPELINES.map((key) => {
+    const data = payload[key]
+    if (!data) return null
+    return { key, data }
+  }).filter((entry): entry is { key: AgentPipeline; data: ActaPayload } => entry !== null)
+
+  if (participantes.length < 2) {
+    return null
+  }
+
+  const header: Header = {
+    departamento: getMajorityValue(participantes.map((agente) => agente.data.header.departamento)),
+    municipio: getMajorityValue(participantes.map((agente) => agente.data.header.municipio)),
+    centro_votacion: getMajorityValue(participantes.map((agente) => agente.data.header.centro_votacion)),
+    jrv: getMajorityValue(participantes.map((agente) => agente.data.header.jrv)),
+    codigo_acta: getMajorityValue(participantes.map((agente) => agente.data.header.codigo_acta)),
+  }
+
+  const partidos = mergePartidos(participantes.map((agente) => agente.data.resultados.partidos))
+
+  const totales: Totales = {
+    validos: getMajorityNumber(
+      participantes
+        .map((agente) => agente.data.resultados.totales.validos)
+        .filter((valor): valor is number => typeof valor === "number"),
+    ),
+    nulos: getMajorityNumber(
+      participantes
+        .map((agente) => agente.data.resultados.totales.nulos)
+        .filter((valor): valor is number => typeof valor === "number"),
+    ),
+    blancos: getMajorityNumber(
+      participantes
+        .map((agente) => agente.data.resultados.totales.blancos)
+        .filter((valor): valor is number => typeof valor === "number"),
+    ),
+    total_sumado: getMajorityNumber(
+      participantes
+        .map((agente) => agente.data.resultados.totales.total_sumado)
+        .filter((valor): valor is number => typeof valor === "number"),
+    ),
+  }
+
+  const verificaciones: Verificaciones = {
+    suma_partidos_igual_validos: consensusBoolean(
+      participantes.map((agente) => agente.data.verificaciones.suma_partidos_igual_validos),
+    ),
+    suma_global_coherente: consensusBoolean(
+      participantes.map((agente) => agente.data.verificaciones.suma_global_coherente),
+    ),
+    campos_firma_presentes: consensusBoolean(
+      participantes.map((agente) => agente.data.verificaciones.campos_firma_presentes),
+    ),
+  }
+
+  const tablas_brutas = mergeTablas(
+    participantes.map((agente) => agente.data.resultados.tablas_brutas ?? []),
+  )
+
+  const confianzaGlobal = calculateConsensusConfidence(
+    participantes.map((agente) => agente.data.meta.confianza_global),
+  )
+
+  const agentesInvolucrados = participantes
+    .map((agente) => AGENT_CONFIGS[agente.key]?.name ?? agente.key)
+    .join(", ")
 
   return {
     meta: {
@@ -294,116 +506,194 @@ function generateConsensus(openaiVision: any, openaiOCR: any, openaiDocument: an
       pais: "Honduras",
       fuente: "CONSENSO",
       timestamp_procesamiento: new Date().toISOString(),
-      version_schema: "1.1.0",
+      version_schema: SCHEMA_VERSION,
       agente: "CONSENSO",
-      confianza_global: 0.9,
+      confianza_global: confianzaGlobal,
     },
     header,
-    resultados: { partidos, totales },
-    verificaciones: {
-      suma_partidos_igual_validos: null,
-      suma_global_coherente: null,
-      campos_firma_presentes: null,
+    resultados: {
+      partidos,
+      totales,
+      tablas_brutas,
     },
-    observaciones: `Consenso generado de ${agents.length} agentes`,
+    verificaciones,
+    observaciones: `Consenso generado a partir de ${participantes.length} agentes: ${agentesInvolucrados}`,
   }
 }
 
-function getMajorityValue(values: any[]): any {
-  if (values.length === 0) return null
+function mergeTablas(tablas: string[][][]): string[][] {
+  const candidatas = tablas
+    .filter((tabla): tabla is string[][] => Array.isArray(tabla) && tabla.length > 0)
+    .map((tabla) =>
+      tabla.map((fila) =>
+        fila
+          .map((celda) => {
+            if (typeof celda === "string") return celda.trim()
+            if (typeof celda === "number" && Number.isFinite(celda)) {
+              return String(celda)
+            }
+            return ""
+          })
+          .map((celda) => celda.normalize("NFKC")),
+      ),
+    )
 
-  const counts: { [key: string]: number } = {}
-  values.forEach((v) => {
-    const key = String(v).trim().toUpperCase()
-    counts[key] = (counts[key] || 0) + 1
-  })
-
-  const entries = Object.entries(counts)
-  const maxCount = Math.max(...entries.map(([, count]) => count))
-
-  if (maxCount >= 2) {
-    const winner = entries.find(([, count]) => count === maxCount)?.[0]
-    return winner || null
+  if (candidatas.length === 0) {
+    return []
   }
 
-  return null
+  const registros = new Map<
+    string,
+    { tabla: string[][]; conteo: number; celdasRellenas: number; filas: number }
+  >()
+
+  candidatas.forEach((tabla) => {
+    const clave = JSON.stringify(tabla)
+    const celdasRellenas = tabla.reduce(
+      (acc, fila) => acc + fila.filter((celda) => celda.length > 0).length,
+      0,
+    )
+    const filas = tabla.length
+    const existente = registros.get(clave)
+    if (existente) {
+      existente.conteo += 1
+      if (
+        celdasRellenas > existente.celdasRellenas ||
+        (celdasRellenas === existente.celdasRellenas && filas > existente.filas)
+      ) {
+        registros.set(clave, { tabla, conteo: existente.conteo, celdasRellenas, filas })
+      }
+    } else {
+      registros.set(clave, { tabla, conteo: 1, celdasRellenas, filas })
+    }
+  })
+
+  const ordenadas = Array.from(registros.values()).sort(
+    (a, b) =>
+      b.conteo - a.conteo ||
+      b.celdasRellenas - a.celdasRellenas ||
+      b.filas - a.filas,
+  )
+
+  const mejor = ordenadas[0]
+  if (mejor.conteo >= 2) {
+    return mejor.tabla
+  }
+
+  const fallback = candidatas
+    .map((tabla) => ({
+      tabla,
+      celdasRellenas: tabla.reduce(
+        (acc, fila) => acc + fila.filter((celda) => celda.length > 0).length,
+        0,
+      ),
+      filas: tabla.length,
+    }))
+    .sort(
+      (a, b) =>
+        b.celdasRellenas - a.celdasRellenas ||
+        b.filas - a.filas,
+    )
+  return fallback[0]?.tabla ?? []
+}
+
+function calculateConsensusConfidence(valores: number[]): number {
+  const validos = valores.filter((valor) => typeof valor === "number" && Number.isFinite(valor))
+  if (validos.length === 0) {
+    return 0.75
+  }
+
+  const promedio = validos.reduce((acc, valor) => acc + valor, 0) / validos.length
+  const ajuste = validos.length === AGENT_PIPELINES.length ? 0.05 : validos.length >= 2 ? 0.02 : 0
+  const confianza = Math.min(0.99, promedio + ajuste)
+  return Number(confianza.toFixed(2))
+}
+
+function mergePartidos(listas: Partido[][]): Partido[] {
+  const mapa = new Map<string, { nombre: string; votos: (number | null)[] }>()
+
+  listas.forEach((lista) => {
+    lista.forEach((partido) => {
+      const nombre = sanitizeText(partido?.nombre)
+      if (!nombre) return
+      const clave = nombre.toUpperCase()
+      const existente = mapa.get(clave)
+      if (existente) {
+        existente.votos.push(partido.votos)
+      } else {
+        mapa.set(clave, { nombre, votos: [partido.votos] })
+      }
+    })
+  })
+
+  return Array.from(mapa.values())
+    .map(({ nombre, votos }) => {
+      const valores = votos.filter((valor): valor is number => typeof valor === "number")
+      return {
+        nombre,
+        votos: getMajorityNumber(valores),
+      }
+    })
+    .sort((a, b) => a.nombre.localeCompare(b.nombre, "es"))
+}
+
+function getMajorityValue(values: (string | null)[]): string | null {
+  const filtrados = values.filter((valor): valor is string => typeof valor === "string" && valor.trim().length > 0)
+  if (filtrados.length === 0) return null
+
+  const contador = new Map<string, { valor: string; conteo: number }>()
+  filtrados.forEach((valor) => {
+    const clave = valor.trim().toUpperCase()
+    const existente = contador.get(clave)
+    if (existente) {
+      existente.conteo += 1
+    } else {
+      contador.set(clave, { valor: valor.trim(), conteo: 1 })
+    }
+  })
+
+  const lista = Array.from(contador.values()).sort((a, b) => b.conteo - a.conteo)
+  return lista[0].conteo >= 2 ? lista[0].valor : null
 }
 
 function getMajorityNumber(values: number[]): number | null {
   if (values.length === 0) return null
 
-  const tolerance = 0
-  const groups: { [key: number]: number[] } = {}
-
-  values.forEach((v) => {
-    let found = false
-    for (const [key, group] of Object.entries(groups)) {
-      if (Math.abs(v - Number(key)) <= tolerance) {
-        group.push(v)
-        found = true
-        break
-      }
-    }
-    if (!found) {
-      groups[v] = [v]
+  const grupos: Map<number, number[]> = new Map()
+  values.forEach((valor) => {
+    const clave = valor
+    if (!grupos.has(clave)) {
+      grupos.set(clave, [valor])
+    } else {
+      grupos.get(clave)!.push(valor)
     }
   })
 
-  const entries = Object.entries(groups)
-  const maxCount = Math.max(...entries.map(([, group]) => group.length))
+  const lista = Array.from(grupos.entries()).sort((a, b) => b[1].length - a[1].length)
+  const [numero, coincidencias] = lista[0]
+  return coincidencias.length >= 2 ? numero : null
+}
 
-  if (maxCount >= 2) {
-    const winnerGroup = entries.find(([, group]) => group.length === maxCount)?.[1]
-    return winnerGroup ? Math.round(winnerGroup.reduce((a, b) => a + b, 0) / winnerGroup.length) : null
-  }
-
+function consensusBoolean(values: (boolean | null)[]): boolean | null {
+  const booleanos = values.filter((valor): valor is boolean => typeof valor === "boolean")
+  if (booleanos.length === 0) return null
+  const verdaderos = booleanos.filter(Boolean).length
+  const falsos = booleanos.length - verdaderos
+  if (verdaderos >= 2) return true
+  if (falsos >= 2) return false
   return null
 }
 
-function validateAndCleanResult(result: any) {
-  const cleanHeader = {
-    departamento: typeof result.header?.departamento === "string" ? result.header.departamento.trim() : null,
-    municipio: typeof result.header?.municipio === "string" ? result.header.municipio.trim() : null,
-    centro_votacion: typeof result.header?.centro_votacion === "string" ? result.header.centro_votacion.trim() : null,
-    jrv: typeof result.header?.jrv === "string" ? result.header.jrv.trim() : null,
-    codigo_acta: typeof result.header?.codigo_acta === "string" ? result.header.codigo_acta.trim() : null,
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message
   }
-
-  const cleanPartidos = Array.isArray(result.resultados?.partidos)
-    ? result.resultados.partidos
-        .filter((p: any) => p.nombre && typeof p.votos === "number" && p.votos >= 0)
-        .map((p: any) => ({
-          nombre: p.nombre.trim(),
-          votos: Math.floor(p.votos),
-        }))
-    : []
-
-  const cleanTotales = {
-    validos:
-      typeof result.resultados?.totales?.validos === "number" ? Math.floor(result.resultados.totales.validos) : null,
-    nulos: typeof result.resultados?.totales?.nulos === "number" ? Math.floor(result.resultados.totales.nulos) : null,
-    blancos:
-      typeof result.resultados?.totales?.blancos === "number" ? Math.floor(result.resultados.totales.blancos) : null,
-    total_sumado:
-      typeof result.resultados?.totales?.total_sumado === "number"
-        ? Math.floor(result.resultados.totales.total_sumado)
-        : null,
+  if (typeof error === "string") {
+    return error
   }
-
-  return {
-    header: cleanHeader,
-    resultados: {
-      partidos: cleanPartidos,
-      totales: cleanTotales,
-    },
+  try {
+    return JSON.stringify(error)
+  } catch (serializationError) {
+    return "Error desconocido"
   }
-}
-
-function calculateVerifications(data: any) {
-  if (!data.resultados?.partidos || !data.resultados?.totales?.validos) {
-    return null
-  }
-
-  const sumPartidos = data.resultados.partidos.reduce((sum: number, partido: any) => sum + (partido.votos || 0), 0)
-  return sumPartidos === data.resultados.totales.validos
 }
