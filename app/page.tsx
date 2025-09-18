@@ -1,36 +1,41 @@
 "use client"
 
 import type React from "react"
-
-import { useState } from "react"
-import { Upload, FileText, BarChart3, CheckCircle, AlertCircle, Clock } from "lucide-react"
+import { useState, useCallback } from "react"
+import { Upload, FileText, BarChart3, CheckCircle, AlertCircle, Clock, Eye, Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
+interface AgentResult {
+  agente: string
+  status: "processing" | "completed" | "error"
+  data?: any
+  error?: string
+}
+
 interface ProcessingResult {
   id: string
   filename: string
   status: "processing" | "completed" | "error"
   progress: number
-  results?: {
-    mesa: string
-    departamento: string
-    municipio: string
-    votos: { [partido: string]: number }
-    consensus: number
+  agents: {
+    openai: AgentResult
+    google: AgentResult
+    aws: AgentResult
   }
+  consensus?: any
+  uploadedFile?: File
 }
 
 export default function HomePage() {
   const [files, setFiles] = useState<ProcessingResult[]>([])
   const [dragActive, setDragActive] = useState(false)
+  const [selectedFile, setSelectedFile] = useState<ProcessingResult | null>(null)
 
-  console.log("[v0] HomePage component loaded successfully")
-
-  const handleDrag = (e: React.DragEvent) => {
+  const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
     if (e.type === "dragenter" || e.type === "dragover") {
@@ -38,89 +43,175 @@ export default function HomePage() {
     } else if (e.type === "dragleave") {
       setDragActive(false)
     }
-  }
+  }, [])
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
     setDragActive(false)
 
-    const droppedFiles = Array.from(e.dataTransfer.files)
+    const droppedFiles = Array.from(e.dataTransfer.files).filter(
+      (file) => file.type.startsWith("image/") || file.type === "application/pdf",
+    )
     processFiles(droppedFiles)
-  }
+  }, [])
 
-  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const selectedFiles = Array.from(e.target.files)
       processFiles(selectedFiles)
     }
-  }
+  }, [])
 
-  const processFiles = (fileList: File[]) => {
-    fileList.forEach((file) => {
+  const processFiles = async (fileList: File[]) => {
+    for (const file of fileList) {
       const newFile: ProcessingResult = {
         id: Math.random().toString(36).substr(2, 9),
         filename: file.name,
         status: "processing",
         progress: 0,
+        uploadedFile: file,
+        agents: {
+          openai: { agente: "OPENAI", status: "processing" },
+          google: { agente: "GCP_DOC_AI", status: "processing" },
+          aws: { agente: "AWS_TEXTRACT", status: "processing" },
+        },
       }
 
       setFiles((prev) => [...prev, newFile])
-
-      // Simulate processing
-      simulateProcessing(newFile.id)
-    })
+      await processWithAI(newFile.id, file)
+    }
   }
 
-  const simulateProcessing = (fileId: string) => {
-    let progress = 0
-    const interval = setInterval(() => {
-      progress += Math.random() * 20
+  const processWithAI = async (fileId: string, file: File) => {
+    try {
+      const formData = new FormData()
+      formData.append("file", file)
 
-      setFiles((prev) =>
-        prev.map((file) => (file.id === fileId ? { ...file, progress: Math.min(progress, 100) } : file)),
-      )
+      // Update progress as agents start
+      setFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, progress: 10 } : f)))
 
-      if (progress >= 100) {
-        clearInterval(interval)
-        // Simulate completion with mock results
-        setTimeout(() => {
-          setFiles((prev) =>
-            prev.map((file) =>
-              file.id === fileId
-                ? {
-                    ...file,
-                    status: "completed",
-                    results: {
-                      mesa: `Mesa ${Math.floor(Math.random() * 1000) + 1}`,
-                      departamento: "Francisco Morazán",
-                      municipio: "Tegucigalpa",
-                      votos: {
-                        "Partido Nacional": Math.floor(Math.random() * 500) + 100,
-                        "Partido Liberal": Math.floor(Math.random() * 400) + 80,
-                        "Partido Libertad y Refundación": Math.floor(Math.random() * 300) + 50,
-                        Otros: Math.floor(Math.random() * 100) + 10,
-                      },
-                      consensus: Math.floor(Math.random() * 30) + 70,
-                    },
-                  }
-                : file,
-            ),
-          )
-        }, 1000)
+      // Process with all three agents in parallel
+      const response = await fetch("/api/process-acta", {
+        method: "POST",
+        body: formData,
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
       }
-    }, 500)
+
+      const result = await response.json()
+
+      // Update with real results
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === fileId
+            ? {
+                ...f,
+                status: "completed",
+                progress: 100,
+                agents: {
+                  openai: {
+                    agente: "OPENAI",
+                    status: result.openai ? "completed" : "error",
+                    data: result.openai,
+                    error: result.openai_error,
+                  },
+                  google: {
+                    agente: "GCP_DOC_AI",
+                    status: result.google ? "completed" : "error",
+                    data: result.google,
+                    error: result.google_error,
+                  },
+                  aws: {
+                    agente: "AWS_TEXTRACT",
+                    status: result.aws ? "completed" : "error",
+                    data: result.aws,
+                    error: result.aws_error,
+                  },
+                },
+                consensus: result.consensus,
+              }
+            : f,
+        ),
+      )
+    } catch (error) {
+      console.error("Error processing file:", error)
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === fileId
+            ? {
+                ...f,
+                status: "error",
+                progress: 0,
+                agents: {
+                  openai: { agente: "OPENAI", status: "error", error: "Error de conexión" },
+                  google: { agente: "GCP_DOC_AI", status: "error", error: "Error de conexión" },
+                  aws: { agente: "AWS_TEXTRACT", status: "error", error: "Error de conexión" },
+                },
+              }
+            : f,
+        ),
+      )
+    }
+  }
+
+  const getAgentStatusIcon = (status: string) => {
+    switch (status) {
+      case "completed":
+        return <CheckCircle className="w-4 h-4 text-green-600" />
+      case "error":
+        return <AlertCircle className="w-4 h-4 text-destructive" />
+      default:
+        return <Clock className="w-4 h-4 text-accent" />
+    }
+  }
+
+  const downloadResult = (fileId: string, agent: string) => {
+    const file = files.find((f) => f.id === fileId)
+    if (!file) return
+
+    let data
+    switch (agent) {
+      case "openai":
+        data = file.agents.openai.data
+        break
+      case "google":
+        data = file.agents.google.data
+        break
+      case "aws":
+        data = file.agents.aws.data
+        break
+      case "consensus":
+        data = file.consensus
+        break
+      default:
+        return
+    }
+
+    if (!data) return
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `${file.filename}.${agent.toUpperCase()}.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
   }
 
   const totalVotes = files
-    .filter((f) => f.results)
+    .filter((f) => f.consensus?.resultados?.partidos)
     .reduce(
       (acc, file) => {
-        if (file.results) {
-          Object.entries(file.results.votos).forEach(([partido, votos]) => {
-            acc[partido] = (acc[partido] || 0) + votos
-          })
-        }
+        file.consensus.resultados.partidos.forEach((partido: any) => {
+          if (typeof partido.votos === "number") {
+            acc[partido.nombre] = (acc[partido.nombre] || 0) + partido.votos
+          }
+        })
         return acc
       },
       {} as { [partido: string]: number },
@@ -137,10 +228,10 @@ export default function HomePage() {
             </div>
             <div>
               <h1 className="text-2xl font-bold text-foreground font-[family-name:var(--font-space-grotesk)]">
-                Sistema de Procesamiento de Actas Electorales
+                Sistema ICR Actas Electorales Honduras
               </h1>
               <p className="text-muted-foreground font-[family-name:var(--font-dm-sans)]">
-                República de Honduras - Tribunal Supremo Electoral
+                Procesamiento con 3 Agentes de IA: OpenAI Vision, Google Document AI, AWS Textract
               </p>
             </div>
           </div>
@@ -160,17 +251,16 @@ export default function HomePage() {
             </TabsTrigger>
             <TabsTrigger value="results" className="flex items-center gap-2">
               <BarChart3 className="w-4 h-4" />
-              Resultados
+              Dashboard
             </TabsTrigger>
           </TabsList>
 
           <TabsContent value="upload" className="space-y-6">
-            {/* Upload Section */}
             <Card>
               <CardHeader>
-                <CardTitle className="font-[family-name:var(--font-space-grotesk)]">Subir Actas Electorales</CardTitle>
+                <CardTitle className="font-[family-name:var(--font-space-grotesk)]">Subir Actas de Diputados</CardTitle>
                 <CardDescription className="font-[family-name:var(--font-dm-sans)]">
-                  Arrastra y suelta las imágenes de las actas o selecciona archivos para procesamiento automático
+                  Sube imágenes de actas electorales para procesamiento automático con consenso de 3 agentes de IA
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -188,7 +278,7 @@ export default function HomePage() {
                     Subir Actas Electorales
                   </h3>
                   <p className="text-muted-foreground mb-4 font-[family-name:var(--font-dm-sans)]">
-                    Formatos soportados: JPG, PNG, PDF
+                    Formatos: JPG, PNG, PDF • Resolución recomendada: ≥300 DPI
                   </p>
                   <input
                     type="file"
@@ -209,12 +299,11 @@ export default function HomePage() {
           </TabsContent>
 
           <TabsContent value="processing" className="space-y-6">
-            {/* Processing Status */}
             <Card>
               <CardHeader>
                 <CardTitle className="font-[family-name:var(--font-space-grotesk)]">Estado del Procesamiento</CardTitle>
                 <CardDescription className="font-[family-name:var(--font-dm-sans)]">
-                  Seguimiento del análisis de actas por múltiples agentes de IA
+                  Seguimiento del análisis por OpenAI Vision, Google Document AI y AWS Textract
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -234,45 +323,168 @@ export default function HomePage() {
                           </div>
                           <div>
                             <p className="font-medium font-[family-name:var(--font-dm-sans)]">{file.filename}</p>
-                            <p className="text-sm text-muted-foreground">
-                              {file.status === "processing" && "Procesando con 3 agentes de IA..."}
-                              {file.status === "completed" && `Consenso: ${file.results?.consensus}%`}
-                              {file.status === "error" && "Error en el procesamiento"}
-                            </p>
+                            <div className="flex gap-2 mt-1">
+                              <div className="flex items-center gap-1">
+                                {getAgentStatusIcon(file.agents.openai.status)}
+                                <span className="text-xs">OpenAI</span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                {getAgentStatusIcon(file.agents.google.status)}
+                                <span className="text-xs">Google</span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                {getAgentStatusIcon(file.agents.aws.status)}
+                                <span className="text-xs">AWS</span>
+                              </div>
+                            </div>
                           </div>
                         </div>
-                        <Badge variant={file.status === "completed" ? "default" : "secondary"}>
-                          {file.status === "processing" && "Procesando"}
-                          {file.status === "completed" && "Completado"}
-                          {file.status === "error" && "Error"}
-                        </Badge>
+                        <div className="flex items-center gap-2">
+                          {file.status === "completed" && (
+                            <Button variant="outline" size="sm" onClick={() => setSelectedFile(file)}>
+                              <Eye className="w-4 h-4 mr-1" />
+                              Ver Resultados
+                            </Button>
+                          )}
+                          <Badge variant={file.status === "completed" ? "default" : "secondary"}>
+                            {file.status === "processing" && "Procesando"}
+                            {file.status === "completed" && "Completado"}
+                            {file.status === "error" && "Error"}
+                          </Badge>
+                        </div>
                       </div>
                       {file.status === "processing" && <Progress value={file.progress} className="w-full" />}
-                      {file.results && (
-                        <div className="grid grid-cols-2 gap-4 mt-3 p-3 bg-muted rounded">
-                          <div>
-                            <p className="text-sm font-medium">Mesa: {file.results.mesa}</p>
-                            <p className="text-sm text-muted-foreground">
-                              {file.results.departamento}, {file.results.municipio}
-                            </p>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-sm font-medium">Total Votos</p>
-                            <p className="text-lg font-bold text-primary">
-                              {Object.values(file.results.votos).reduce((a, b) => a + b, 0)}
-                            </p>
-                          </div>
-                        </div>
-                      )}
                     </div>
                   ))
                 )}
               </CardContent>
             </Card>
+
+            {selectedFile && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="font-[family-name:var(--font-space-grotesk)]">
+                    Resultados: {selectedFile.filename}
+                  </CardTitle>
+                  <CardDescription className="font-[family-name:var(--font-dm-sans)]">
+                    Comparación de resultados por agente y consenso final
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+                    {/* OpenAI Results */}
+                    <div className="border rounded p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="font-medium text-sm">OpenAI Vision</h4>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => downloadResult(selectedFile.id, "openai")}
+                          disabled={!selectedFile.agents.openai.data}
+                        >
+                          <Download className="w-3 h-3" />
+                        </Button>
+                      </div>
+                      {selectedFile.agents.openai.status === "completed" ? (
+                        <div className="text-xs space-y-1">
+                          <p>Departamento: {selectedFile.agents.openai.data?.header?.departamento || "ND"}</p>
+                          <p>Municipio: {selectedFile.agents.openai.data?.header?.municipio || "ND"}</p>
+                          <p>Partidos: {selectedFile.agents.openai.data?.resultados?.partidos?.length || 0}</p>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-destructive">{selectedFile.agents.openai.error || "Error"}</p>
+                      )}
+                    </div>
+
+                    {/* Google Results */}
+                    <div className="border rounded p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="font-medium text-sm">Google DocAI</h4>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => downloadResult(selectedFile.id, "google")}
+                          disabled={!selectedFile.agents.google.data}
+                        >
+                          <Download className="w-3 h-3" />
+                        </Button>
+                      </div>
+                      {selectedFile.agents.google.status === "completed" ? (
+                        <div className="text-xs space-y-1">
+                          <p>Departamento: {selectedFile.agents.google.data?.header?.departamento || "ND"}</p>
+                          <p>Municipio: {selectedFile.agents.google.data?.header?.municipio || "ND"}</p>
+                          <p>Partidos: {selectedFile.agents.google.data?.resultados?.partidos?.length || 0}</p>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-destructive">{selectedFile.agents.google.error || "Error"}</p>
+                      )}
+                    </div>
+
+                    {/* AWS Results */}
+                    <div className="border rounded p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="font-medium text-sm">AWS Textract</h4>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => downloadResult(selectedFile.id, "aws")}
+                          disabled={!selectedFile.agents.aws.data}
+                        >
+                          <Download className="w-3 h-3" />
+                        </Button>
+                      </div>
+                      {selectedFile.agents.aws.status === "completed" ? (
+                        <div className="text-xs space-y-1">
+                          <p>Departamento: {selectedFile.agents.aws.data?.header?.departamento || "ND"}</p>
+                          <p>Municipio: {selectedFile.agents.aws.data?.header?.municipio || "ND"}</p>
+                          <p>Partidos: {selectedFile.agents.aws.data?.resultados?.partidos?.length || 0}</p>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-destructive">{selectedFile.agents.aws.error || "Error"}</p>
+                      )}
+                    </div>
+
+                    {/* Consensus Results */}
+                    <div className="border rounded p-3 bg-primary/5">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="font-medium text-sm">CONSENSO</h4>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => downloadResult(selectedFile.id, "consensus")}
+                          disabled={!selectedFile.consensus}
+                        >
+                          <Download className="w-3 h-3" />
+                        </Button>
+                      </div>
+                      {selectedFile.consensus ? (
+                        <div className="text-xs space-y-1">
+                          <p>Departamento: {selectedFile.consensus.header?.departamento || "ND"}</p>
+                          <p>Municipio: {selectedFile.consensus.header?.municipio || "ND"}</p>
+                          <p>Partidos: {selectedFile.consensus.resultados?.partidos?.length || 0}</p>
+                          <p className="font-medium text-primary">
+                            Total Votos:{" "}
+                            {selectedFile.consensus.resultados?.partidos?.reduce(
+                              (sum: number, p: any) => sum + (typeof p.votos === "number" ? p.votos : 0),
+                              0,
+                            ) || 0}
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">Sin consenso</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <Button variant="outline" onClick={() => setSelectedFile(null)} className="w-full">
+                    Cerrar
+                  </Button>
+                </CardContent>
+              </Card>
+            )}
           </TabsContent>
 
           <TabsContent value="results" className="space-y-6">
-            {/* Results Dashboard */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <Card>
                 <CardHeader className="pb-2">
@@ -291,7 +503,7 @@ export default function HomePage() {
               <Card>
                 <CardHeader className="pb-2">
                   <CardTitle className="text-sm font-medium font-[family-name:var(--font-space-grotesk)]">
-                    Total Votos
+                    Total Votos (Consenso)
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
@@ -300,27 +512,19 @@ export default function HomePage() {
                       .reduce((a, b) => a + b, 0)
                       .toLocaleString()}
                   </div>
-                  <p className="text-xs text-muted-foreground">votos contabilizados</p>
+                  <p className="text-xs text-muted-foreground">votos validados</p>
                 </CardContent>
               </Card>
 
               <Card>
                 <CardHeader className="pb-2">
                   <CardTitle className="text-sm font-medium font-[family-name:var(--font-space-grotesk)]">
-                    Consenso Promedio
+                    Agentes Activos
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="text-2xl font-bold text-primary">
-                    {files.filter((f) => f.results).length > 0
-                      ? Math.round(
-                          files.filter((f) => f.results).reduce((acc, f) => acc + (f.results?.consensus || 0), 0) /
-                            files.filter((f) => f.results).length,
-                        )
-                      : 0}
-                    %
-                  </div>
-                  <p className="text-xs text-muted-foreground">confiabilidad</p>
+                  <div className="text-2xl font-bold text-primary">3</div>
+                  <p className="text-xs text-muted-foreground">OpenAI • Google • AWS</p>
                 </CardContent>
               </Card>
             </div>
@@ -328,9 +532,11 @@ export default function HomePage() {
             {Object.keys(totalVotes).length > 0 && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="font-[family-name:var(--font-space-grotesk)]">Resultados por Partido</CardTitle>
+                  <CardTitle className="font-[family-name:var(--font-space-grotesk)]">
+                    Resultados por Partido (Solo Consenso)
+                  </CardTitle>
                   <CardDescription className="font-[family-name:var(--font-dm-sans)]">
-                    Conteo acumulado de votos procesados
+                    Conteo acumulado basado únicamente en datos de consenso validados por ≥2 agentes
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
