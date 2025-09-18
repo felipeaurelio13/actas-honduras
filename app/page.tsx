@@ -28,12 +28,27 @@ interface ProcessingResult {
   }
   consensus?: any
   uploadedFile?: File
+  debugLogs?: string[] // Added debug logs array
 }
 
 export default function HomePage() {
   const [files, setFiles] = useState<ProcessingResult[]>([])
   const [dragActive, setDragActive] = useState(false)
   const [selectedFile, setSelectedFile] = useState<ProcessingResult | null>(null)
+
+  const addDebugLog = (fileId: string, message: string) => {
+    const timestamp = new Date().toLocaleTimeString()
+    setFiles((prev) =>
+      prev.map((f) =>
+        f.id === fileId
+          ? {
+              ...f,
+              debugLogs: [...(f.debugLogs || []), `[${timestamp}] ${message}`],
+            }
+          : f,
+      ),
+    )
+  }
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -71,25 +86,29 @@ export default function HomePage() {
         status: "processing",
         progress: 0,
         uploadedFile: file,
+        debugLogs: [], // Initialize debug logs
         agents: {
-          openai: { agente: "OPENAI", status: "processing" },
-          google: { agente: "GCP_DOC_AI", status: "processing" },
-          aws: { agente: "AWS_TEXTRACT", status: "processing" },
+          openai: { agente: "OPENAI_VISION", status: "processing" }, // Updated agent names
+          google: { agente: "OPENAI_OCR", status: "processing" },
+          aws: { agente: "OPENAI_DOCUMENT", status: "processing" },
         },
       }
 
       setFiles((prev) => [...prev, newFile])
+      addDebugLog(newFile.id, `🚀 Iniciando procesamiento de ${file.name} (${(file.size / 1024).toFixed(1)}KB)`)
       await processWithAI(newFile.id, file)
     }
   }
 
   const processWithAI = async (fileId: string, file: File) => {
     try {
+      addDebugLog(fileId, "📤 Preparando archivo para envío...")
       const formData = new FormData()
       formData.append("file", file)
 
       // Update progress as agents start
       setFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, progress: 10 } : f)))
+      addDebugLog(fileId, "🔄 Enviando a 3 agentes OpenAI en paralelo...")
 
       // Process with all three agents in parallel
       const response = await fetch("/api/process-acta", {
@@ -97,11 +116,37 @@ export default function HomePage() {
         body: formData,
       })
 
+      addDebugLog(fileId, `📡 Respuesta del servidor: ${response.status} ${response.statusText}`)
+
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
+        const errorText = await response.text()
+        addDebugLog(fileId, `❌ Error HTTP: ${errorText}`)
+        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`)
       }
 
       const result = await response.json()
+      addDebugLog(fileId, `📊 Datos recibidos: ${JSON.stringify(Object.keys(result))}`)
+
+      const openaiVisionSuccess = result.openai_vision && !result.openai_vision_error
+      const openaiOCRSuccess = result.openai_ocr && !result.openai_ocr_error
+      const openaiDocumentSuccess = result.openai_document && !result.openai_document_error
+
+      addDebugLog(fileId, `🤖 Agente Vision: ${openaiVisionSuccess ? "✅ Éxito" : "❌ Error"}`)
+      addDebugLog(fileId, `🤖 Agente OCR: ${openaiOCRSuccess ? "✅ Éxito" : "❌ Error"}`)
+      addDebugLog(fileId, `🤖 Agente Document: ${openaiDocumentSuccess ? "✅ Éxito" : "❌ Error"}`)
+
+      if (result.openai_vision_error) addDebugLog(fileId, `❌ Error Vision: ${result.openai_vision_error}`)
+      if (result.openai_ocr_error) addDebugLog(fileId, `❌ Error OCR: ${result.openai_ocr_error}`)
+      if (result.openai_document_error) addDebugLog(fileId, `❌ Error Document: ${result.openai_document_error}`)
+
+      if (result.consensus) {
+        const partidosCount = result.consensus.resultados?.partidos?.length || 0
+        const totalVotos =
+          result.consensus.resultados?.partidos?.reduce((sum: number, p: any) => sum + (p.votos || 0), 0) || 0
+        addDebugLog(fileId, `🎯 Consenso generado: ${partidosCount} partidos, ${totalVotos} votos totales`)
+      } else {
+        addDebugLog(fileId, "⚠️ No se pudo generar consenso (menos de 2 agentes exitosos)")
+      }
 
       // Update with real results
       setFiles((prev) =>
@@ -113,22 +158,22 @@ export default function HomePage() {
                 progress: 100,
                 agents: {
                   openai: {
-                    agente: "OPENAI",
-                    status: result.openai ? "completed" : "error",
-                    data: result.openai,
-                    error: result.openai_error,
+                    agente: "OPENAI_VISION",
+                    status: openaiVisionSuccess ? "completed" : "error",
+                    data: result.openai_vision,
+                    error: result.openai_vision_error,
                   },
                   google: {
-                    agente: "GCP_DOC_AI",
-                    status: result.google ? "completed" : "error",
-                    data: result.google,
-                    error: result.google_error,
+                    agente: "OPENAI_OCR",
+                    status: openaiOCRSuccess ? "completed" : "error",
+                    data: result.openai_ocr,
+                    error: result.openai_ocr_error,
                   },
                   aws: {
-                    agente: "AWS_TEXTRACT",
-                    status: result.aws ? "completed" : "error",
-                    data: result.aws,
-                    error: result.aws_error,
+                    agente: "OPENAI_DOCUMENT",
+                    status: openaiDocumentSuccess ? "completed" : "error",
+                    data: result.openai_document,
+                    error: result.openai_document_error,
                   },
                 },
                 consensus: result.consensus,
@@ -136,8 +181,13 @@ export default function HomePage() {
             : f,
         ),
       )
-    } catch (error) {
+
+      addDebugLog(fileId, "✅ Procesamiento completado exitosamente")
+    } catch (error: any) {
       console.error("Error processing file:", error)
+      addDebugLog(fileId, `💥 Error crítico: ${error.message}`)
+      addDebugLog(fileId, `🔍 Stack trace: ${error.stack?.substring(0, 200)}...`)
+
       setFiles((prev) =>
         prev.map((f) =>
           f.id === fileId
@@ -146,9 +196,9 @@ export default function HomePage() {
                 status: "error",
                 progress: 0,
                 agents: {
-                  openai: { agente: "OPENAI", status: "error", error: "Error de conexión" },
-                  google: { agente: "GCP_DOC_AI", status: "error", error: "Error de conexión" },
-                  aws: { agente: "AWS_TEXTRACT", status: "error", error: "Error de conexión" },
+                  openai: { agente: "OPENAI_VISION", status: "error", error: error.message },
+                  google: { agente: "OPENAI_OCR", status: "error", error: error.message },
+                  aws: { agente: "OPENAI_DOCUMENT", status: "error", error: error.message },
                 },
               }
             : f,
@@ -231,7 +281,7 @@ export default function HomePage() {
                 Sistema ICR Actas Electorales Honduras
               </h1>
               <p className="text-muted-foreground font-[family-name:var(--font-dm-sans)]">
-                Procesamiento con 3 Agentes de IA: OpenAI Vision, Google Document AI, AWS Textract
+                Procesamiento con 3 Agentes OpenAI: Vision, OCR, Document Analysis {/* Updated description */}
               </p>
             </div>
           </div>
@@ -260,7 +310,8 @@ export default function HomePage() {
               <CardHeader>
                 <CardTitle className="font-[family-name:var(--font-space-grotesk)]">Subir Actas de Diputados</CardTitle>
                 <CardDescription className="font-[family-name:var(--font-dm-sans)]">
-                  Sube imágenes de actas electorales para procesamiento automático con consenso de 3 agentes de IA
+                  Sube imágenes de actas electorales para procesamiento automático con consenso de 3 agentes OpenAI{" "}
+                  {/* Updated description */}
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -303,7 +354,7 @@ export default function HomePage() {
               <CardHeader>
                 <CardTitle className="font-[family-name:var(--font-space-grotesk)]">Estado del Procesamiento</CardTitle>
                 <CardDescription className="font-[family-name:var(--font-dm-sans)]">
-                  Seguimiento del análisis por OpenAI Vision, Google Document AI y AWS Textract
+                  Seguimiento del análisis por 3 agentes OpenAI especializados {/* Updated description */}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -326,7 +377,7 @@ export default function HomePage() {
                             <div className="flex gap-2 mt-1">
                               <div className="flex items-center gap-1">
                                 {getAgentStatusIcon(file.agents.openai.status)}
-                                <span className="text-xs">OpenAI</span>
+                                <span className="text-xs">Vision</span> {/* Updated agent names */}
                                 {file.agents.openai.error && (
                                   <span className="text-xs text-destructive ml-1">
                                     ({file.agents.openai.error.substring(0, 20)}...)
@@ -335,7 +386,7 @@ export default function HomePage() {
                               </div>
                               <div className="flex items-center gap-1">
                                 {getAgentStatusIcon(file.agents.google.status)}
-                                <span className="text-xs">Google</span>
+                                <span className="text-xs">OCR</span> {/* Updated agent names */}
                                 {file.agents.google.error && (
                                   <span className="text-xs text-destructive ml-1">
                                     ({file.agents.google.error.substring(0, 20)}...)
@@ -344,7 +395,7 @@ export default function HomePage() {
                               </div>
                               <div className="flex items-center gap-1">
                                 {getAgentStatusIcon(file.agents.aws.status)}
-                                <span className="text-xs">AWS</span>
+                                <span className="text-xs">Document</span> {/* Updated agent names */}
                                 {file.agents.aws.error && (
                                   <span className="text-xs text-destructive ml-1">
                                     ({file.agents.aws.error.substring(0, 20)}...)
@@ -389,6 +440,19 @@ export default function HomePage() {
                             }
                             /3
                           </span>
+                        </div>
+                      )}
+
+                      {file.debugLogs && file.debugLogs.length > 0 && (
+                        <div className="mt-3 p-3 bg-muted rounded-lg">
+                          <h4 className="text-sm font-medium mb-2">🔍 Debug Log:</h4>
+                          <div className="text-xs space-y-1 max-h-32 overflow-y-auto">
+                            {file.debugLogs.slice(-10).map((log, index) => (
+                              <div key={index} className="font-mono text-muted-foreground">
+                                {log}
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </div>

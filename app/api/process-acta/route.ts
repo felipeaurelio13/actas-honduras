@@ -146,52 +146,47 @@ INSTRUCCIONES CRÍTICAS:
 
     console.log(`[v0] ${agentType} - Making OpenAI API call...`)
 
-    const response = await client.chat.completions.create({
-      model: process.env.OPENAI_VISION_MODEL || "gpt-4o",
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: `${selectedPrompt}
+    const models = ["gpt-4o", "gpt-4-vision-preview", "gpt-4-turbo"]
+    let response
+    let lastError
 
-Estructura JSON requerida:
-{
-  "header": {
-    "departamento": "string exacto del documento o null",
-    "municipio": "string exacto del documento o null", 
-    "centro_votacion": "string exacto del documento o null",
-    "jrv": "string exacto del documento o null",
-    "codigo_acta": "string exacto del documento o null"
-  },
-  "resultados": {
-    "partidos": [
-      {"nombre": "Nombre exacto del partido", "votos": número_exacto_visible}
-    ],
-    "totales": {
-      "validos": número_total_votos_válidos,
-      "nulos": número_votos_nulos, 
-      "blancos": número_votos_blancos,
-      "total_sumado": número_total_general
-    }
-  }
-}
-
-IMPORTANTE: Solo incluye partidos que realmente veas con votos claramente legibles.`,
-            },
+    for (const model of models) {
+      try {
+        console.log(`[v0] ${agentType} - Trying model: ${model}`)
+        response = await client.chat.completions.create({
+          model: model,
+          messages: [
             {
-              type: "image_url",
-              image_url: {
-                url: `data:image/jpeg;base64,${base64Image}`,
-              },
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: `${selectedPrompt}\n\nEstructura JSON requerida:\n{\n  "header": {\n    "departamento": "string exacto del documento o null",\n    "municipio": "string exacto del documento o null", \n    "centro_votacion": "string exacto del documento o null",\n    "jrv": "string exacto del documento o null",\n    "codigo_acta": "string exacto del documento o null"\n  },\n  "resultados": {\n    "partidos": [\n      {"nombre": "Nombre exacto del partido", "votos": número_exacto_visible}\n    ],\n    "totales": {\n      "validos": número_total_votos_válidos,\n      "nulos": número_votos_nulos, \n      "blancos": número_votos_blancos,\n      "total_sumado": número_total_general\n    }\n  }\n}\n\nIMPORTANTE: Solo incluye partidos que realmente veas con votos claramente legibles.`,
+                },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:image/jpeg;base64,${base64Image}`,
+                  },
+                },
+              ],
             },
           ],
-        },
-      ],
-      max_tokens: 1500,
-      temperature: agentType === "OPENAI_VISION" ? 0 : 0.1, // Slight variation for different agents
-    })
+          max_tokens: 1500,
+          temperature: agentType === "OPENAI_VISION" ? 0 : 0.1, // Slight variation for different agents
+        })
+        console.log(`[v0] ${agentType} - Success with model: ${model}`)
+        break
+      } catch (error: any) {
+        console.error(`[v0] ${agentType} - Model ${model} failed:`, error.message)
+        lastError = error
+        continue
+      }
+    }
+
+    if (!response) {
+      throw lastError || new Error("Todos los modelos fallaron")
+    }
 
     console.log(`[v0] ${agentType} - OpenAI API response received`)
 
