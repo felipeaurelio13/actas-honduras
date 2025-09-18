@@ -1,35 +1,70 @@
 "use client"
 
 import type React from "react"
-import { useState, useCallback } from "react"
+import { useState, useCallback, useMemo } from "react"
 import { Upload, FileText, BarChart3, CheckCircle, AlertCircle, Clock, Eye, Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { APP_NAME, APP_VERSION, SUPPORT_EMAIL } from "@/lib/app-info"
+
+type AgentKey = "vision" | "ocr" | "document"
+
+type AgentStatus = "processing" | "completed" | "error"
+
+type ApiAgentResultKey = "openai_vision" | "openai_ocr" | "openai_document"
+
+type ApiAgentErrorKey = "openai_vision_error" | "openai_ocr_error" | "openai_document_error"
 
 interface AgentResult {
-  agente: string
-  status: "processing" | "completed" | "error"
+  status: AgentStatus
   data?: any
   error?: string
 }
+
+type AgentsState = Record<AgentKey, AgentResult>
 
 interface ProcessingResult {
   id: string
   filename: string
   status: "processing" | "completed" | "error"
   progress: number
-  agents: {
-    openai: AgentResult
-    google: AgentResult
-    aws: AgentResult
-  }
+  agents: AgentsState
   consensus?: any
   uploadedFile?: File
   debugLogs?: string[] // Added debug logs array
 }
+
+const agentMetadata: Record<AgentKey, { label: string; shortLabel: string; resultKey: ApiAgentResultKey; errorKey: ApiAgentErrorKey }> = {
+  vision: {
+    label: "OpenAI Vision (Análisis visual)",
+    shortLabel: "Visión",
+    resultKey: "openai_vision",
+    errorKey: "openai_vision_error",
+  },
+  ocr: {
+    label: "OpenAI OCR (Reconocimiento de texto)",
+    shortLabel: "OCR",
+    resultKey: "openai_ocr",
+    errorKey: "openai_ocr_error",
+  },
+  document: {
+    label: "OpenAI Document (Comprensión estructural)",
+    shortLabel: "Documento",
+    resultKey: "openai_document",
+    errorKey: "openai_document_error",
+  },
+}
+
+const agentOrder: AgentKey[] = ["vision", "ocr", "document"]
+
+const createInitialAgentsState = (): AgentsState => ({
+  vision: { status: "processing" },
+  ocr: { status: "processing" },
+  document: { status: "processing" },
+})
 
 export default function HomePage() {
   const [files, setFiles] = useState<ProcessingResult[]>([])
@@ -81,17 +116,13 @@ export default function HomePage() {
   const processFiles = async (fileList: File[]) => {
     for (const file of fileList) {
       const newFile: ProcessingResult = {
-        id: Math.random().toString(36).substr(2, 9),
+        id: Math.random().toString(36).slice(2, 11),
         filename: file.name,
         status: "processing",
         progress: 0,
         uploadedFile: file,
-        debugLogs: [], // Initialize debug logs
-        agents: {
-          openai: { agente: "OPENAI_VISION", status: "processing" }, // Updated agent names
-          google: { agente: "OPENAI_OCR", status: "processing" },
-          aws: { agente: "OPENAI_DOCUMENT", status: "processing" },
-        },
+        debugLogs: [],
+        agents: createInitialAgentsState(),
       }
 
       setFiles((prev) => [...prev, newFile])
@@ -127,17 +158,24 @@ export default function HomePage() {
       const result = await response.json()
       addDebugLog(fileId, `📊 Datos recibidos: ${JSON.stringify(Object.keys(result))}`)
 
-      const openaiVisionSuccess = result.openai_vision && !result.openai_vision_error
-      const openaiOCRSuccess = result.openai_ocr && !result.openai_ocr_error
-      const openaiDocumentSuccess = result.openai_document && !result.openai_document_error
+      const agentSnapshots = agentOrder.map((key) => {
+        const meta = agentMetadata[key]
+        const agentData = result?.[meta.resultKey] ?? null
+        const agentError = result?.[meta.errorKey] ?? null
+        const success = Boolean(agentData) && !agentError
 
-      addDebugLog(fileId, `🤖 Agente Vision: ${openaiVisionSuccess ? "✅ Éxito" : "❌ Error"}`)
-      addDebugLog(fileId, `🤖 Agente OCR: ${openaiOCRSuccess ? "✅ Éxito" : "❌ Error"}`)
-      addDebugLog(fileId, `🤖 Agente Document: ${openaiDocumentSuccess ? "✅ Éxito" : "❌ Error"}`)
+        addDebugLog(fileId, `🤖 ${meta.label}: ${success ? "✅ Éxito" : "❌ Error"}`)
+        if (agentError) {
+          addDebugLog(fileId, `❌ Detalle ${meta.shortLabel}: ${agentError}`)
+        }
 
-      if (result.openai_vision_error) addDebugLog(fileId, `❌ Error Vision: ${result.openai_vision_error}`)
-      if (result.openai_ocr_error) addDebugLog(fileId, `❌ Error OCR: ${result.openai_ocr_error}`)
-      if (result.openai_document_error) addDebugLog(fileId, `❌ Error Document: ${result.openai_document_error}`)
+        return {
+          key,
+          data: agentData,
+          error: agentError as string | null,
+          success,
+        }
+      })
 
       if (result.consensus) {
         const partidosCount = result.consensus.resultados?.partidos?.length || 0
@@ -148,38 +186,29 @@ export default function HomePage() {
         addDebugLog(fileId, "⚠️ No se pudo generar consenso (menos de 2 agentes exitosos)")
       }
 
-      // Update with real results
+      const hasSuccess = agentSnapshots.some((snapshot) => snapshot.success)
+
       setFiles((prev) =>
-        prev.map((f) =>
-          f.id === fileId
-            ? {
-                ...f,
-                status: "completed",
-                progress: 100,
-                agents: {
-                  openai: {
-                    agente: "OPENAI_VISION",
-                    status: openaiVisionSuccess ? "completed" : "error",
-                    data: result.openai_vision,
-                    error: result.openai_vision_error,
-                  },
-                  google: {
-                    agente: "OPENAI_OCR",
-                    status: openaiOCRSuccess ? "completed" : "error",
-                    data: result.openai_ocr,
-                    error: result.openai_ocr_error,
-                  },
-                  aws: {
-                    agente: "OPENAI_DOCUMENT",
-                    status: openaiDocumentSuccess ? "completed" : "error",
-                    data: result.openai_document,
-                    error: result.openai_document_error,
-                  },
-                },
-                consensus: result.consensus,
-              }
-            : f,
-        ),
+        prev.map((f) => {
+          if (f.id !== fileId) return f
+
+          const agents = agentSnapshots.reduce((acc, snapshot) => {
+            acc[snapshot.key] = {
+              status: snapshot.success ? "completed" : "error",
+              data: snapshot.data ?? undefined,
+              error: snapshot.error ?? undefined,
+            }
+            return acc
+          }, {} as AgentsState)
+
+          return {
+            ...f,
+            status: hasSuccess ? "completed" : "error",
+            progress: hasSuccess ? 100 : 0,
+            agents,
+            consensus: result.consensus,
+          }
+        }),
       )
 
       addDebugLog(fileId, "✅ Procesamiento completado exitosamente")
@@ -195,11 +224,10 @@ export default function HomePage() {
                 ...f,
                 status: "error",
                 progress: 0,
-                agents: {
-                  openai: { agente: "OPENAI_VISION", status: "error", error: error.message },
-                  google: { agente: "OPENAI_OCR", status: "error", error: error.message },
-                  aws: { agente: "OPENAI_DOCUMENT", status: "error", error: error.message },
-                },
+                agents: agentOrder.reduce((acc, key) => {
+                  acc[key] = { status: "error", error: error.message }
+                  return acc
+                }, {} as AgentsState),
               }
             : f,
         ),
@@ -207,7 +235,7 @@ export default function HomePage() {
     }
   }
 
-  const getAgentStatusIcon = (status: string) => {
+  const getAgentStatusIcon = (status: AgentStatus) => {
     switch (status) {
       case "completed":
         return <CheckCircle className="w-4 h-4 text-green-600" />
@@ -218,27 +246,14 @@ export default function HomePage() {
     }
   }
 
-  const downloadResult = (fileId: string, agent: string) => {
+  const downloadResult = (fileId: string, target: AgentKey | "consensus") => {
     const file = files.find((f) => f.id === fileId)
     if (!file) return
 
-    let data
-    switch (agent) {
-      case "openai":
-        data = file.agents.openai.data
-        break
-      case "google":
-        data = file.agents.google.data
-        break
-      case "aws":
-        data = file.agents.aws.data
-        break
-      case "consensus":
-        data = file.consensus
-        break
-      default:
-        return
-    }
+    const data =
+      target === "consensus"
+        ? file.consensus
+        : file.agents[target]?.data
 
     if (!data) return
 
@@ -246,26 +261,34 @@ export default function HomePage() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement("a")
     a.href = url
-    a.download = `${file.filename}.${agent.toUpperCase()}.json`
+    const suffix =
+      target === "consensus"
+        ? "CONSENSO"
+        : agentMetadata[target].resultKey.toUpperCase()
+    a.download = `${file.filename}.${suffix}.json`
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
   }
 
-  const totalVotes = files
-    .filter((f) => f.consensus?.resultados?.partidos)
-    .reduce(
-      (acc, file) => {
-        file.consensus.resultados.partidos.forEach((partido: any) => {
-          if (typeof partido.votos === "number") {
-            acc[partido.nombre] = (acc[partido.nombre] || 0) + partido.votos
-          }
-        })
-        return acc
-      },
-      {} as { [partido: string]: number },
-    )
+  const totalVotes = useMemo(
+    () =>
+      files
+        .filter((f) => f.consensus?.resultados?.partidos)
+        .reduce(
+          (acc, file) => {
+            file.consensus.resultados.partidos.forEach((partido: any) => {
+              if (typeof partido.votos === "number") {
+                acc[partido.nombre] = (acc[partido.nombre] || 0) + partido.votos
+              }
+            })
+            return acc
+          },
+          {} as { [partido: string]: number },
+        ),
+    [files],
+  )
 
   return (
     <div className="min-h-screen bg-background">
@@ -277,11 +300,9 @@ export default function HomePage() {
               <FileText className="w-6 h-6 text-primary-foreground" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-foreground font-[family-name:var(--font-space-grotesk)]">
-                Sistema ICR Actas Electorales Honduras
-              </h1>
+              <h1 className="text-2xl font-bold text-foreground font-[family-name:var(--font-space-grotesk)]">{APP_NAME}</h1>
               <p className="text-muted-foreground font-[family-name:var(--font-dm-sans)]">
-                Procesamiento con 3 Agentes OpenAI: Vision, OCR, Document Analysis {/* Updated description */}
+                Procesamiento paralelo con 3 agentes especializados de OpenAI para llegar a un consenso confiable.
               </p>
             </div>
           </div>
@@ -310,8 +331,7 @@ export default function HomePage() {
               <CardHeader>
                 <CardTitle className="font-[family-name:var(--font-space-grotesk)]">Subir Actas de Diputados</CardTitle>
                 <CardDescription className="font-[family-name:var(--font-dm-sans)]">
-                  Sube imágenes de actas electorales para procesamiento automático con consenso de 3 agentes OpenAI{" "}
-                  {/* Updated description */}
+                  Sube imágenes de actas electorales para procesamiento automático y consenso con agentes de OpenAI.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -354,7 +374,7 @@ export default function HomePage() {
               <CardHeader>
                 <CardTitle className="font-[family-name:var(--font-space-grotesk)]">Estado del Procesamiento</CardTitle>
                 <CardDescription className="font-[family-name:var(--font-dm-sans)]">
-                  Seguimiento del análisis por 3 agentes OpenAI especializados {/* Updated description */}
+                  Seguimiento del análisis por 3 agentes OpenAI especializados.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -374,34 +394,20 @@ export default function HomePage() {
                           </div>
                           <div>
                             <p className="font-medium font-[family-name:var(--font-dm-sans)]">{file.filename}</p>
-                            <div className="flex gap-2 mt-1">
-                              <div className="flex items-center gap-1">
-                                {getAgentStatusIcon(file.agents.openai.status)}
-                                <span className="text-xs">Vision</span> {/* Updated agent names */}
-                                {file.agents.openai.error && (
-                                  <span className="text-xs text-destructive ml-1">
-                                    ({file.agents.openai.error.substring(0, 20)}...)
-                                  </span>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-1">
-                                {getAgentStatusIcon(file.agents.google.status)}
-                                <span className="text-xs">OCR</span> {/* Updated agent names */}
-                                {file.agents.google.error && (
-                                  <span className="text-xs text-destructive ml-1">
-                                    ({file.agents.google.error.substring(0, 20)}...)
-                                  </span>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-1">
-                                {getAgentStatusIcon(file.agents.aws.status)}
-                                <span className="text-xs">Document</span> {/* Updated agent names */}
-                                {file.agents.aws.error && (
-                                  <span className="text-xs text-destructive ml-1">
-                                    ({file.agents.aws.error.substring(0, 20)}...)
-                                  </span>
-                                )}
-                              </div>
+                            <div className="flex gap-2 mt-1 flex-wrap">
+                              {agentOrder.map((agentKey) => {
+                                const agent = file.agents[agentKey]
+                                const meta = agentMetadata[agentKey]
+                                return (
+                                  <div key={agentKey} className="flex items-center gap-1">
+                                    {getAgentStatusIcon(agent.status)}
+                                    <span className="text-xs">{meta.shortLabel}</span>
+                                    {agent.error && (
+                                      <span className="text-xs text-destructive ml-1">({agent.error.substring(0, 20)}...)</span>
+                                    )}
+                                  </div>
+                                )
+                              })}
                             </div>
                           </div>
                         </div>
@@ -434,9 +440,7 @@ export default function HomePage() {
                           <span className="text-muted-foreground">
                             Agentes exitosos:{" "}
                             {
-                              [file.agents.openai, file.agents.google, file.agents.aws].filter(
-                                (a) => a.status === "completed",
-                              ).length
+                              agentOrder.filter((agentKey) => file.agents[agentKey].status === "completed").length
                             }
                             /3
                           </span>
@@ -473,142 +477,63 @@ export default function HomePage() {
                 </CardHeader>
                 <CardContent>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-                    {/* OpenAI Results */}
-                    <div className="border rounded p-3">
-                      <div className="flex items-center justify-between mb-2">
-                        <h4 className="font-medium text-sm">OpenAI Vision</h4>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => downloadResult(selectedFile.id, "openai")}
-                          disabled={!selectedFile.agents.openai.data}
-                        >
-                          <Download className="w-3 h-3" />
-                        </Button>
-                      </div>
-                      {selectedFile.agents.openai.status === "completed" ? (
-                        <div className="text-xs space-y-1">
-                          <p>
-                            <strong>Depto:</strong>{" "}
-                            {selectedFile.agents.openai.data?.header?.departamento || "No detectado"}
-                          </p>
-                          <p>
-                            <strong>Municipio:</strong>{" "}
-                            {selectedFile.agents.openai.data?.header?.municipio || "No detectado"}
-                          </p>
-                          <p>
-                            <strong>JRV:</strong> {selectedFile.agents.openai.data?.header?.jrv || "No detectado"}
-                          </p>
-                          <p>
-                            <strong>Partidos:</strong>{" "}
-                            {selectedFile.agents.openai.data?.resultados?.partidos?.length || 0}
-                          </p>
-                          <p>
-                            <strong>Total Votos:</strong>{" "}
-                            {selectedFile.agents.openai.data?.resultados?.partidos?.reduce(
-                              (sum: number, p: any) => sum + (p.votos || 0),
-                              0,
-                            ) || 0}
-                          </p>
-                        </div>
-                      ) : (
-                        <div className="text-xs">
-                          <p className="text-destructive font-medium">Error:</p>
-                          <p className="text-destructive">{selectedFile.agents.openai.error || "Error desconocido"}</p>
-                        </div>
-                      )}
-                    </div>
+                    {agentOrder.map((agentKey) => {
+                      const agent = selectedFile.agents[agentKey]
+                      const meta = agentMetadata[agentKey]
+                      const partidos = Array.isArray(agent.data?.resultados?.partidos)
+                        ? agent.data.resultados.partidos
+                        : []
+                      const totalVotos = partidos.reduce((sum: number, partido: any) => sum + (partido?.votos || 0), 0)
 
-                    {/* Google Results */}
-                    <div className="border rounded p-3">
-                      <div className="flex items-center justify-between mb-2">
-                        <h4 className="font-medium text-sm">Google DocAI</h4>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => downloadResult(selectedFile.id, "google")}
-                          disabled={!selectedFile.agents.google.data}
-                        >
-                          <Download className="w-3 h-3" />
-                        </Button>
-                      </div>
-                      {selectedFile.agents.google.status === "completed" ? (
-                        <div className="text-xs space-y-1">
-                          <p>
-                            <strong>Depto:</strong>{" "}
-                            {selectedFile.agents.google.data?.header?.departamento || "No detectado"}
-                          </p>
-                          <p>
-                            <strong>Municipio:</strong>{" "}
-                            {selectedFile.agents.google.data?.header?.municipio || "No detectado"}
-                          </p>
-                          <p>
-                            <strong>JRV:</strong> {selectedFile.agents.google.data?.header?.jrv || "No detectado"}
-                          </p>
-                          <p>
-                            <strong>Partidos:</strong>{" "}
-                            {selectedFile.agents.google.data?.resultados?.partidos?.length || 0}
-                          </p>
-                          <p>
-                            <strong>Total Votos:</strong>{" "}
-                            {selectedFile.agents.google.data?.resultados?.partidos?.reduce(
-                              (sum: number, p: any) => sum + (p.votos || 0),
-                              0,
-                            ) || 0}
-                          </p>
-                        </div>
-                      ) : (
-                        <div className="text-xs">
-                          <p className="text-destructive font-medium">Error:</p>
-                          <p className="text-destructive">{selectedFile.agents.google.error || "Error desconocido"}</p>
-                        </div>
-                      )}
-                    </div>
+                      let content
+                      if (agent.status === "completed") {
+                        content = (
+                          <div className="text-xs space-y-1">
+                            <p>
+                              <strong>Depto:</strong> {agent.data?.header?.departamento || "No detectado"}
+                            </p>
+                            <p>
+                              <strong>Municipio:</strong> {agent.data?.header?.municipio || "No detectado"}
+                            </p>
+                            <p>
+                              <strong>JRV:</strong> {agent.data?.header?.jrv || "No detectado"}
+                            </p>
+                            <p>
+                              <strong>Partidos:</strong> {partidos.length}
+                            </p>
+                            <p>
+                              <strong>Total Votos:</strong> {totalVotos}
+                            </p>
+                          </div>
+                        )
+                      } else if (agent.status === "processing") {
+                        content = <p className="text-xs text-muted-foreground">Procesando datos...</p>
+                      } else {
+                        content = (
+                          <div className="text-xs">
+                            <p className="text-destructive font-medium">Error:</p>
+                            <p className="text-destructive">{agent.error || "Error desconocido"}</p>
+                          </div>
+                        )
+                      }
 
-                    {/* AWS Results */}
-                    <div className="border rounded p-3">
-                      <div className="flex items-center justify-between mb-2">
-                        <h4 className="font-medium text-sm">AWS Textract</h4>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => downloadResult(selectedFile.id, "aws")}
-                          disabled={!selectedFile.agents.aws.data}
-                        >
-                          <Download className="w-3 h-3" />
-                        </Button>
-                      </div>
-                      {selectedFile.agents.aws.status === "completed" ? (
-                        <div className="text-xs space-y-1">
-                          <p>
-                            <strong>Depto:</strong>{" "}
-                            {selectedFile.agents.aws.data?.header?.departamento || "No detectado"}
-                          </p>
-                          <p>
-                            <strong>Municipio:</strong>{" "}
-                            {selectedFile.agents.aws.data?.header?.municipio || "No detectado"}
-                          </p>
-                          <p>
-                            <strong>JRV:</strong> {selectedFile.agents.aws.data?.header?.jrv || "No detectado"}
-                          </p>
-                          <p>
-                            <strong>Partidos:</strong> {selectedFile.agents.aws.data?.resultados?.partidos?.length || 0}
-                          </p>
-                          <p>
-                            <strong>Total Votos:</strong>{" "}
-                            {selectedFile.agents.aws.data?.resultados?.partidos?.reduce(
-                              (sum: number, p: any) => sum + (p.votos || 0),
-                              0,
-                            ) || 0}
-                          </p>
+                      return (
+                        <div key={agentKey} className="border rounded p-3">
+                          <div className="flex items-center justify-between mb-2">
+                            <h4 className="font-medium text-sm">{meta.label}</h4>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => downloadResult(selectedFile.id, agentKey)}
+                              disabled={!agent.data}
+                            >
+                              <Download className="w-3 h-3" />
+                            </Button>
+                          </div>
+                          {content}
                         </div>
-                      ) : (
-                        <div className="text-xs">
-                          <p className="text-destructive font-medium">Error:</p>
-                          <p className="text-destructive">{selectedFile.agents.aws.error || "Error desconocido"}</p>
-                        </div>
-                      )}
-                    </div>
+                      )
+                    })}
 
                     {/* Consensus Results */}
                     <div className="border rounded p-3 bg-primary/5">
@@ -741,7 +666,7 @@ export default function HomePage() {
                 </CardHeader>
                 <CardContent>
                   <div className="text-2xl font-bold text-primary">3</div>
-                  <p className="text-xs text-muted-foreground">OpenAI • Google • AWS</p>
+                  <p className="text-xs text-muted-foreground">OpenAI Vision • OpenAI OCR • OpenAI Document</p>
                 </CardContent>
               </Card>
             </div>
@@ -783,6 +708,18 @@ export default function HomePage() {
           </TabsContent>
         </Tabs>
       </div>
+      <footer className="border-t bg-card">
+        <div className="container mx-auto px-4 py-4 text-xs text-muted-foreground flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+          <span className="font-[family-name:var(--font-dm-sans)] text-foreground/80">{APP_NAME}</span>
+          <span className="font-mono">Versión {APP_VERSION}</span>
+          <a
+            href={`mailto:${SUPPORT_EMAIL}`}
+            className="hover:text-foreground transition-colors"
+          >
+            Soporte: {SUPPORT_EMAIL}
+          </a>
+        </div>
+      </footer>
     </div>
   )
 }

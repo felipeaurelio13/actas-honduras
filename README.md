@@ -1,29 +1,82 @@
 # hn-icr-diputados-cloud-v1
 
-Conteo paralelo de **Actas de Cierre – Diputados (Honduras)** usando **3 agentes cloud** en paralelo:
-1) **OpenAI Vision** (Structured Outputs)
-2) **Google Document AI**
-3) **AWS Textract**
+`v1.1.1` – Plataforma para el conteo paralelo de **Actas de Cierre – Diputados (Honduras)** utilizando **tres agentes especializados de OpenAI** que se ejecutan en paralelo y generan un consenso automático cuando al menos dos coinciden.
 
-**v1**: app local, sin BD. JSONs en `outputs/` (A/B/C/CONSENSO). `/dashboard` suma los **CONSENSO**.
+## Novedades 1.1.1
+
+- Consenso más completo: ahora se fusionan las `tablas_brutas` cuando al menos dos agentes coinciden o, en su defecto, se selecciona la tabla más informativa disponible.
+- Mayor confiabilidad: el consenso calcula una confianza ponderada según los agentes participantes e indica explícitamente qué agentes aportaron al resultado.
+- Correcciones Responses API: el backend utiliza `image_base64` y prioriza `output_text`, evitando errores intermitentes en la extracción del JSON.
+- Flujo de calidad listo: `pnpm lint` ya funciona sin instalaciones manuales adicionales gracias a las dependencias de ESLint incluidas.
+
+## Arquitectura
+
+- **Next.js 14** (App Router) con TailwindCSS para la interfaz y la API serverless (`/api/process-acta`).
+- **Tres agentes OpenAI** (visión, OCR y análisis documental) invocados desde el backend de Next.js mediante `response_format` con JSON Schema.
+- **Consenso automático**: compara encabezados, resultados y verificaciones para consolidar los datos cuando al menos dos agentes están de acuerdo.
+- **FastAPI opcional** (`app/main.py`): referencia para ejecutar agentes de OpenAI, Google Document AI y AWS Textract desde un servicio Python tradicional.
 
 ## Requisitos
-- Python 3.11
-- Credenciales (OpenAI, GCP Document AI, AWS Textract)
 
-## Setup
-\`\`\`bash
+- Node.js 18 o superior (se recomienda PNPM o NPM 9+).
+- Cuenta de OpenAI con acceso a modelos multimodales (por ejemplo `gpt-4.1`).
+- (Opcional) Python 3.11 + credenciales de GCP/AWS si se desea utilizar el pipeline alterno de FastAPI.
+
+## Variables de entorno
+
+| Variable | Descripción |
+| --- | --- |
+| `OPENAI_API_KEY` | **Obligatoria.** Clave de OpenAI con permisos de visión estructurada. |
+| `NEXT_PUBLIC_APP_VERSION` | Versión mostrada en el footer (por defecto `v1.1.1`). |
+| `OPENAI_DEFAULT_MODEL` | Modelo multimodal a usar cuando no se especifique uno por agente (opcional, `gpt-4.1` por defecto). |
+| `OPENAI_VISION_MODEL` | Modelo específico para el agente de inspección visual (opcional). |
+| `OPENAI_OCR_MODEL` | Modelo específico para el agente orientado a OCR (opcional). |
+| `OPENAI_DOCUMENT_MODEL` | Modelo específico para el agente de análisis documental (opcional). |
+| `DOC_AI_PROJECT`, `DOC_AI_LOCATION`, `DOC_AI_PROCESSOR_ID` | Variables necesarias solo para el servicio FastAPI de Google Document AI. |
+| `AWS_REGION` | Región para AWS Textract en el servicio FastAPI (opcional, `us-east-1`). |
+
+⚠️ **Las llaves sensibles deben configurarse únicamente en GitHub/GitHub Actions o en tu entorno local, nunca se deben versionar.**
+
+## Instalación y ejecución (Next.js)
+
+```bash
+# Instalar dependencias (usa pnpm, npm o yarn)
+pnpm install
+
+# Copiar variables de ejemplo
+cp .env.example .env.local
+
+# Ejecutar en desarrollo
+pnpm dev
+
+# Linter (antes de crear un PR)
+pnpm lint
+```
+
+La aplicación estará disponible en `http://localhost:3000`. Desde la pestaña **Subir Actas** se cargan imágenes (`.jpg`, `.png`, `.pdf`). El backend envía el archivo a los tres agentes de OpenAI y, al finalizar, permite descargar los JSON individuales y el consenso.
+
+## Flujo de procesamiento
+
+1. **Preprocesamiento** en el navegador: se envía el archivo a `/api/process-acta`.
+2. **Agentes en paralelo**: visión, OCR y análisis documental generan JSONs con encabezado, partidos y totales siguiendo un esquema estricto.
+3. **Validaciones**: cada respuesta calcula si la suma de partidos coincide con los votos válidos y si los totales cuadran.
+4. **Consenso**: si al menos dos agentes coinciden, se produce un JSON final con los campos mayoritarios y se registra el resultado en el dashboard.
+
+## FastAPI opcional
+
+Si necesitas ejecutar los agentes de Google Document AI y AWS Textract, puedes iniciar el servicio incluido:
+
+```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
 python -m app.main
-\`\`\`
+```
 
-## Uso
-- `http://127.0.0.1:8000` → subir imagen (acta Diputados)
-- Ver A/B/C/CONSENSO y descargar JSONs
-- `http://127.0.0.1:8000/dashboard` → sumatoria por partido (desde CONSENSO)
+El servicio se expone en `http://127.0.0.1:8000`, guarda las salidas en `outputs/` y ofrece un dashboard de agregados. Requiere las credenciales de Google y AWS configuradas mediante variables de entorno.
 
-## Política
-- Si hay duda: `ND` (no inventar)
-- CONSENSO pide ≥2 agentes de acuerdo por campo
+## Buenas prácticas
+
+- Nunca inventar datos: los agentes y el consenso devuelven `null` cuando un valor es ilegible.
+- Mantener enfoque *mobile-first* y minimalista en la interfaz.
+- Ejecutar `pnpm lint` antes de subir cambios.
+- Actualizar la versión mostrada en el footer (`NEXT_PUBLIC_APP_VERSION`) y documentar cualquier cambio relevante en este README.
