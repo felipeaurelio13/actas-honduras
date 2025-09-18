@@ -327,14 +327,29 @@ export default function HomePage() {
                               <div className="flex items-center gap-1">
                                 {getAgentStatusIcon(file.agents.openai.status)}
                                 <span className="text-xs">OpenAI</span>
+                                {file.agents.openai.error && (
+                                  <span className="text-xs text-destructive ml-1">
+                                    ({file.agents.openai.error.substring(0, 20)}...)
+                                  </span>
+                                )}
                               </div>
                               <div className="flex items-center gap-1">
                                 {getAgentStatusIcon(file.agents.google.status)}
                                 <span className="text-xs">Google</span>
+                                {file.agents.google.error && (
+                                  <span className="text-xs text-destructive ml-1">
+                                    ({file.agents.google.error.substring(0, 20)}...)
+                                  </span>
+                                )}
                               </div>
                               <div className="flex items-center gap-1">
                                 {getAgentStatusIcon(file.agents.aws.status)}
                                 <span className="text-xs">AWS</span>
+                                {file.agents.aws.error && (
+                                  <span className="text-xs text-destructive ml-1">
+                                    ({file.agents.aws.error.substring(0, 20)}...)
+                                  </span>
+                                )}
                               </div>
                             </div>
                           </div>
@@ -354,6 +369,28 @@ export default function HomePage() {
                         </div>
                       </div>
                       {file.status === "processing" && <Progress value={file.progress} className="w-full" />}
+                      {file.status === "completed" && (
+                        <div className="flex items-center gap-2 text-sm">
+                          {file.consensus ? (
+                            <Badge variant="default" className="bg-green-100 text-green-800">
+                              ✓ Consenso Generado
+                            </Badge>
+                          ) : (
+                            <Badge variant="secondary" className="bg-yellow-100 text-yellow-800">
+                              ⚠ Sin Consenso (≤1 agente exitoso)
+                            </Badge>
+                          )}
+                          <span className="text-muted-foreground">
+                            Agentes exitosos:{" "}
+                            {
+                              [file.agents.openai, file.agents.google, file.agents.aws].filter(
+                                (a) => a.status === "completed",
+                              ).length
+                            }
+                            /3
+                          </span>
+                        </div>
+                      )}
                     </div>
                   ))
                 )}
@@ -364,14 +401,14 @@ export default function HomePage() {
               <Card>
                 <CardHeader>
                   <CardTitle className="font-[family-name:var(--font-space-grotesk)]">
-                    Resultados: {selectedFile.filename}
+                    Resultados Detallados: {selectedFile.filename}
                   </CardTitle>
                   <CardDescription className="font-[family-name:var(--font-dm-sans)]">
-                    Comparación de resultados por agente y consenso final
+                    Comparación de resultados por agente y consenso final - Solo datos reales extraídos
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
                     {/* OpenAI Results */}
                     <div className="border rounded p-3">
                       <div className="flex items-center justify-between mb-2">
@@ -387,12 +424,34 @@ export default function HomePage() {
                       </div>
                       {selectedFile.agents.openai.status === "completed" ? (
                         <div className="text-xs space-y-1">
-                          <p>Departamento: {selectedFile.agents.openai.data?.header?.departamento || "ND"}</p>
-                          <p>Municipio: {selectedFile.agents.openai.data?.header?.municipio || "ND"}</p>
-                          <p>Partidos: {selectedFile.agents.openai.data?.resultados?.partidos?.length || 0}</p>
+                          <p>
+                            <strong>Depto:</strong>{" "}
+                            {selectedFile.agents.openai.data?.header?.departamento || "No detectado"}
+                          </p>
+                          <p>
+                            <strong>Municipio:</strong>{" "}
+                            {selectedFile.agents.openai.data?.header?.municipio || "No detectado"}
+                          </p>
+                          <p>
+                            <strong>JRV:</strong> {selectedFile.agents.openai.data?.header?.jrv || "No detectado"}
+                          </p>
+                          <p>
+                            <strong>Partidos:</strong>{" "}
+                            {selectedFile.agents.openai.data?.resultados?.partidos?.length || 0}
+                          </p>
+                          <p>
+                            <strong>Total Votos:</strong>{" "}
+                            {selectedFile.agents.openai.data?.resultados?.partidos?.reduce(
+                              (sum: number, p: any) => sum + (p.votos || 0),
+                              0,
+                            ) || 0}
+                          </p>
                         </div>
                       ) : (
-                        <p className="text-xs text-destructive">{selectedFile.agents.openai.error || "Error"}</p>
+                        <div className="text-xs">
+                          <p className="text-destructive font-medium">Error:</p>
+                          <p className="text-destructive">{selectedFile.agents.openai.error || "Error desconocido"}</p>
+                        </div>
                       )}
                     </div>
 
@@ -411,12 +470,34 @@ export default function HomePage() {
                       </div>
                       {selectedFile.agents.google.status === "completed" ? (
                         <div className="text-xs space-y-1">
-                          <p>Departamento: {selectedFile.agents.google.data?.header?.departamento || "ND"}</p>
-                          <p>Municipio: {selectedFile.agents.google.data?.header?.municipio || "ND"}</p>
-                          <p>Partidos: {selectedFile.agents.google.data?.resultados?.partidos?.length || 0}</p>
+                          <p>
+                            <strong>Depto:</strong>{" "}
+                            {selectedFile.agents.google.data?.header?.departamento || "No detectado"}
+                          </p>
+                          <p>
+                            <strong>Municipio:</strong>{" "}
+                            {selectedFile.agents.google.data?.header?.municipio || "No detectado"}
+                          </p>
+                          <p>
+                            <strong>JRV:</strong> {selectedFile.agents.google.data?.header?.jrv || "No detectado"}
+                          </p>
+                          <p>
+                            <strong>Partidos:</strong>{" "}
+                            {selectedFile.agents.google.data?.resultados?.partidos?.length || 0}
+                          </p>
+                          <p>
+                            <strong>Total Votos:</strong>{" "}
+                            {selectedFile.agents.google.data?.resultados?.partidos?.reduce(
+                              (sum: number, p: any) => sum + (p.votos || 0),
+                              0,
+                            ) || 0}
+                          </p>
                         </div>
                       ) : (
-                        <p className="text-xs text-destructive">{selectedFile.agents.google.error || "Error"}</p>
+                        <div className="text-xs">
+                          <p className="text-destructive font-medium">Error:</p>
+                          <p className="text-destructive">{selectedFile.agents.google.error || "Error desconocido"}</p>
+                        </div>
                       )}
                     </div>
 
@@ -435,19 +516,40 @@ export default function HomePage() {
                       </div>
                       {selectedFile.agents.aws.status === "completed" ? (
                         <div className="text-xs space-y-1">
-                          <p>Departamento: {selectedFile.agents.aws.data?.header?.departamento || "ND"}</p>
-                          <p>Municipio: {selectedFile.agents.aws.data?.header?.municipio || "ND"}</p>
-                          <p>Partidos: {selectedFile.agents.aws.data?.resultados?.partidos?.length || 0}</p>
+                          <p>
+                            <strong>Depto:</strong>{" "}
+                            {selectedFile.agents.aws.data?.header?.departamento || "No detectado"}
+                          </p>
+                          <p>
+                            <strong>Municipio:</strong>{" "}
+                            {selectedFile.agents.aws.data?.header?.municipio || "No detectado"}
+                          </p>
+                          <p>
+                            <strong>JRV:</strong> {selectedFile.agents.aws.data?.header?.jrv || "No detectado"}
+                          </p>
+                          <p>
+                            <strong>Partidos:</strong> {selectedFile.agents.aws.data?.resultados?.partidos?.length || 0}
+                          </p>
+                          <p>
+                            <strong>Total Votos:</strong>{" "}
+                            {selectedFile.agents.aws.data?.resultados?.partidos?.reduce(
+                              (sum: number, p: any) => sum + (p.votos || 0),
+                              0,
+                            ) || 0}
+                          </p>
                         </div>
                       ) : (
-                        <p className="text-xs text-destructive">{selectedFile.agents.aws.error || "Error"}</p>
+                        <div className="text-xs">
+                          <p className="text-destructive font-medium">Error:</p>
+                          <p className="text-destructive">{selectedFile.agents.aws.error || "Error desconocido"}</p>
+                        </div>
                       )}
                     </div>
 
                     {/* Consensus Results */}
                     <div className="border rounded p-3 bg-primary/5">
                       <div className="flex items-center justify-between mb-2">
-                        <h4 className="font-medium text-sm">CONSENSO</h4>
+                        <h4 className="font-medium text-sm">CONSENSO FINAL</h4>
                         <Button
                           variant="ghost"
                           size="sm"
@@ -459,25 +561,76 @@ export default function HomePage() {
                       </div>
                       {selectedFile.consensus ? (
                         <div className="text-xs space-y-1">
-                          <p>Departamento: {selectedFile.consensus.header?.departamento || "ND"}</p>
-                          <p>Municipio: {selectedFile.consensus.header?.municipio || "ND"}</p>
-                          <p>Partidos: {selectedFile.consensus.resultados?.partidos?.length || 0}</p>
+                          <p>
+                            <strong>Depto:</strong> {selectedFile.consensus.header?.departamento || "No consenso"}
+                          </p>
+                          <p>
+                            <strong>Municipio:</strong> {selectedFile.consensus.header?.municipio || "No consenso"}
+                          </p>
+                          <p>
+                            <strong>JRV:</strong> {selectedFile.consensus.header?.jrv || "No consenso"}
+                          </p>
+                          <p>
+                            <strong>Partidos:</strong> {selectedFile.consensus.resultados?.partidos?.length || 0}
+                          </p>
                           <p className="font-medium text-primary">
-                            Total Votos:{" "}
+                            <strong>Total Votos:</strong>{" "}
                             {selectedFile.consensus.resultados?.partidos?.reduce(
                               (sum: number, p: any) => sum + (typeof p.votos === "number" ? p.votos : 0),
                               0,
                             ) || 0}
                           </p>
+                          <p className="text-green-600 font-medium">✓ Validado por ≥2 agentes</p>
                         </div>
                       ) : (
-                        <p className="text-xs text-muted-foreground">Sin consenso</p>
+                        <div className="text-xs">
+                          <p className="text-muted-foreground font-medium">Sin consenso disponible</p>
+                          <p className="text-muted-foreground">Se requieren ≥2 agentes exitosos</p>
+                        </div>
                       )}
                     </div>
                   </div>
 
+                  {selectedFile.consensus && selectedFile.consensus.resultados?.partidos?.length > 0 && (
+                    <div className="mb-4">
+                      <h5 className="font-medium mb-2">Desglose por Partido (Consenso)</h5>
+                      <div className="border rounded-lg overflow-hidden">
+                        <table className="w-full text-sm">
+                          <thead className="bg-muted">
+                            <tr>
+                              <th className="text-left p-2">Partido</th>
+                              <th className="text-right p-2">Votos</th>
+                              <th className="text-right p-2">%</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedFile.consensus.resultados.partidos
+                              .sort((a: any, b: any) => (b.votos || 0) - (a.votos || 0))
+                              .map((partido: any, index: number) => {
+                                const totalVotos = selectedFile.consensus.resultados.partidos.reduce(
+                                  (sum: number, p: any) => sum + (p.votos || 0),
+                                  0,
+                                )
+                                const percentage =
+                                  totalVotos > 0 ? (((partido.votos || 0) / totalVotos) * 100).toFixed(1) : "0.0"
+                                return (
+                                  <tr key={index} className="border-t">
+                                    <td className="p-2 font-medium">{partido.nombre}</td>
+                                    <td className="p-2 text-right font-mono">
+                                      {(partido.votos || 0).toLocaleString()}
+                                    </td>
+                                    <td className="p-2 text-right text-muted-foreground">{percentage}%</td>
+                                  </tr>
+                                )
+                              })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
                   <Button variant="outline" onClick={() => setSelectedFile(null)} className="w-full">
-                    Cerrar
+                    Cerrar Detalles
                   </Button>
                 </CardContent>
               </Card>

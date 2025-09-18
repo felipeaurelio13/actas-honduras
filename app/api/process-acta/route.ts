@@ -16,58 +16,48 @@ export async function POST(request: NextRequest) {
 
     // Initialize results
     const results: any = {
-      openai: null,
-      google: null,
-      aws: null,
+      openai_vision: null,
+      openai_ocr: null,
+      openai_document: null,
       consensus: null,
-      openai_error: null,
-      google_error: null,
-      aws_error: null,
+      openai_vision_error: null,
+      openai_ocr_error: null,
+      openai_document_error: null,
     }
 
-    // Process with OpenAI Vision
-    try {
-      if (process.env.OPENAI_API_KEY) {
-        const openaiResult = await processWithOpenAI(buffer, file.name)
-        results.openai = openaiResult
-      } else {
-        results.openai_error = "OPENAI_API_KEY no configurada"
-      }
-    } catch (error) {
-      console.error("OpenAI processing error:", error)
-      results.openai_error = error instanceof Error ? error.message : "Error desconocido"
+    const [openaiVisionResult, openaiOCRResult, openaiDocumentResult] = await Promise.allSettled([
+      processWithOpenAI(buffer, file.name, "OPENAI_VISION"),
+      processWithOpenAI(buffer, file.name, "OPENAI_OCR"),
+      processWithOpenAI(buffer, file.name, "OPENAI_DOCUMENT"),
+    ])
+
+    // Handle OpenAI Vision Agent results
+    if (openaiVisionResult.status === "fulfilled") {
+      results.openai_vision = openaiVisionResult.value
+    } else {
+      results.openai_vision_error = openaiVisionResult.reason?.message || "Error en agente OpenAI Vision"
     }
 
-    // Process with Google Document AI
-    try {
-      if (process.env.GOOGLE_APPLICATION_CREDENTIALS && process.env.DOC_AI_PROJECT) {
-        const googleResult = await processWithGoogle(buffer, file.name)
-        results.google = googleResult
-      } else {
-        results.google_error = "Credenciales de Google Document AI no configuradas"
-      }
-    } catch (error) {
-      console.error("Google processing error:", error)
-      results.google_error = error instanceof Error ? error.message : "Error desconocido"
+    // Handle OpenAI OCR Agent results
+    if (openaiOCRResult.status === "fulfilled") {
+      results.openai_ocr = openaiOCRResult.value
+    } else {
+      results.openai_ocr_error = openaiOCRResult.reason?.message || "Error en agente OpenAI OCR"
     }
 
-    // Process with AWS Textract
-    try {
-      if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
-        const awsResult = await processWithAWS(buffer, file.name)
-        results.aws = awsResult
-      } else {
-        results.aws_error = "Credenciales de AWS no configuradas"
-      }
-    } catch (error) {
-      console.error("AWS processing error:", error)
-      results.aws_error = error instanceof Error ? error.message : "Error desconocido"
+    // Handle OpenAI Document Agent results
+    if (openaiDocumentResult.status === "fulfilled") {
+      results.openai_document = openaiDocumentResult.value
+    } else {
+      results.openai_document_error = openaiDocumentResult.reason?.message || "Error en agente OpenAI Document"
     }
 
     // Generate consensus if we have at least 2 successful results
-    const successfulResults = [results.openai, results.google, results.aws].filter((r) => r !== null)
+    const successfulResults = [results.openai_vision, results.openai_ocr, results.openai_document].filter(
+      (r) => r !== null,
+    )
     if (successfulResults.length >= 2) {
-      results.consensus = generateConsensus(results.openai, results.google, results.aws)
+      results.consensus = generateConsensus(results.openai_vision, results.openai_ocr, results.openai_document)
     }
 
     return NextResponse.json(results)
@@ -77,10 +67,44 @@ export async function POST(request: NextRequest) {
   }
 }
 
-async function processWithOpenAI(buffer: Buffer, filename: string) {
+async function processWithOpenAI(buffer: Buffer, filename: string, agentType = "OPENAI_VISION") {
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
   const base64Image = buffer.toString("base64")
+
+  const prompts = {
+    OPENAI_VISION: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando análisis visual avanzado.
+
+ENFOQUE: Análisis visual detallado de la imagen
+INSTRUCCIONES CRÍTICAS:
+1. Lee EXACTAMENTE lo que ves en la imagen - NO inventes ni adivines números
+2. Si un número no es claramente legible, usa null
+3. Busca específicamente partidos políticos hondureños como: Partido Nacional, Partido Liberal, LIBRE, PSH, etc.
+4. Los votos deben ser números enteros exactos que veas en la imagen
+5. Prioriza la claridad visual de los números`,
+
+    OPENAI_OCR: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando técnicas de OCR.
+
+ENFOQUE: Reconocimiento óptico de caracteres y texto estructurado
+INSTRUCCIONES CRÍTICAS:
+1. Extrae texto de manera sistemática línea por línea
+2. Identifica patrones de texto que indican nombres de partidos y números
+3. Busca específicamente partidos políticos hondureños: Partido Nacional, Partido Liberal, LIBRE, PSH, etc.
+4. Valida que los números extraídos sean coherentes
+5. Si hay ambigüedad en OCR, usa null`,
+
+    OPENAI_DOCUMENT: `Eres un experto transcriptor de actas electorales hondureñas para elecciones de DIPUTADOS usando análisis de documentos estructurados.
+
+ENFOQUE: Comprensión de estructura documental y layout
+INSTRUCCIONES CRÍTICAS:
+1. Analiza la estructura del documento electoral hondureño
+2. Identifica secciones: encabezado, tabla de partidos, totales
+3. Busca específicamente partidos políticos hondureños: Partido Nacional, Partido Liberal, LIBRE, PSH, etc.
+4. Valida coherencia entre sumas parciales y totales
+5. Considera el formato estándar de actas electorales hondureñas`,
+  }
+
+  const selectedPrompt = prompts[agentType as keyof typeof prompts] || prompts.OPENAI_VISION
 
   const response = await client.chat.completions.create({
     model: process.env.OPENAI_VISION_MODEL || "gpt-4o",
@@ -90,28 +114,31 @@ async function processWithOpenAI(buffer: Buffer, filename: string) {
         content: [
           {
             type: "text",
-            text: `Eres un experto transcriptor de actas electorales hondureñas (Acta de Cierre, nivel Diputados). 
-            Extrae EXACTAMENTE el texto que ves (no adivines). 
-            Devuelve un JSON con la estructura:
-            {
-              "header": {
-                "departamento": "string o null",
-                "municipio": "string o null", 
-                "centro_votacion": "string o null",
-                "jrv": "string o null",
-                "codigo_acta": "string o null"
-              },
-              "resultados": {
-                "partidos": [{"nombre": "string", "votos": number}],
-                "totales": {
-                  "validos": number,
-                  "nulos": number, 
-                  "blancos": number,
-                  "total_sumado": number
-                }
-              }
-            }
-            Si no puedes leer un campo claramente, usa null. No inventes valores.`,
+            text: `${selectedPrompt}
+
+Estructura JSON requerida:
+{
+  "header": {
+    "departamento": "string exacto del documento o null",
+    "municipio": "string exacto del documento o null", 
+    "centro_votacion": "string exacto del documento o null",
+    "jrv": "string exacto del documento o null",
+    "codigo_acta": "string exacto del documento o null"
+  },
+  "resultados": {
+    "partidos": [
+      {"nombre": "Nombre exacto del partido", "votos": número_exacto_visible}
+    ],
+    "totales": {
+      "validos": número_total_votos_válidos,
+      "nulos": número_votos_nulos, 
+      "blancos": número_votos_blancos,
+      "total_sumado": número_total_general
+    }
+  }
+}
+
+IMPORTANTE: Solo incluye partidos que realmente veas con votos claramente legibles.`,
           },
           {
             type: "image_url",
@@ -122,7 +149,8 @@ async function processWithOpenAI(buffer: Buffer, filename: string) {
         ],
       },
     ],
-    max_tokens: 1000,
+    max_tokens: 1500,
+    temperature: agentType === "OPENAI_VISION" ? 0 : 0.1, // Slight variation for different agents
   })
 
   const content = response.choices[0].message.content
@@ -131,11 +159,25 @@ async function processWithOpenAI(buffer: Buffer, filename: string) {
   try {
     parsedResult = JSON.parse(content || "{}")
   } catch {
-    // If JSON parsing fails, create a basic structure
+    console.error(`Failed to parse ${agentType} response:`, content)
     parsedResult = {
       header: { departamento: null, municipio: null, centro_votacion: null, jrv: null, codigo_acta: null },
       resultados: { partidos: [], totales: { validos: null, nulos: null, blancos: null, total_sumado: null } },
     }
+  }
+
+  const validatedResult = validateAndCleanResult(parsedResult)
+
+  const agentNames = {
+    OPENAI_VISION: "OPENAI_VISION",
+    OPENAI_OCR: "OPENAI_OCR",
+    OPENAI_DOCUMENT: "OPENAI_DOCUMENT",
+  }
+
+  const confidenceLevels = {
+    OPENAI_VISION: 0.85,
+    OPENAI_OCR: 0.8,
+    OPENAI_DOCUMENT: 0.82,
   }
 
   return {
@@ -145,13 +187,13 @@ async function processWithOpenAI(buffer: Buffer, filename: string) {
       fuente: filename,
       timestamp_procesamiento: new Date().toISOString(),
       version_schema: "1.1.0",
-      agente: "OPENAI",
-      confianza_global: 0.85,
+      agente: agentNames[agentType as keyof typeof agentNames] || "OPENAI",
+      confianza_global: confidenceLevels[agentType as keyof typeof confidenceLevels] || 0.85,
     },
-    header: parsedResult.header,
-    resultados: parsedResult.resultados,
+    header: validatedResult.header,
+    resultados: validatedResult.resultados,
     verificaciones: {
-      suma_partidos_igual_validos: null,
+      suma_partidos_igual_validos: calculateVerifications(validatedResult),
       suma_global_coherente: null,
       campos_firma_presentes: null,
     },
@@ -159,60 +201,11 @@ async function processWithOpenAI(buffer: Buffer, filename: string) {
   }
 }
 
-async function processWithGoogle(buffer: Buffer, filename: string) {
-  // Placeholder for Google Document AI processing
-  // In a real implementation, you would use the Google Cloud Document AI client
-  return {
-    meta: {
-      nivel: "Diputados",
-      pais: "Honduras",
-      fuente: filename,
-      timestamp_procesamiento: new Date().toISOString(),
-      version_schema: "1.1.0",
-      agente: "GCP_DOC_AI",
-      confianza_global: 0.8,
-    },
-    header: { departamento: null, municipio: null, centro_votacion: null, jrv: null, codigo_acta: null },
-    resultados: { partidos: [], totales: { validos: null, nulos: null, blancos: null, total_sumado: null } },
-    verificaciones: {
-      suma_partidos_igual_validos: null,
-      suma_global_coherente: null,
-      campos_firma_presentes: null,
-    },
-    observaciones: "Servicio Google Document AI no implementado completamente",
-  }
-}
-
-async function processWithAWS(buffer: Buffer, filename: string) {
-  // Placeholder for AWS Textract processing
-  // In a real implementation, you would use the AWS SDK for Textract
-  return {
-    meta: {
-      nivel: "Diputados",
-      pais: "Honduras",
-      fuente: filename,
-      timestamp_procesamiento: new Date().toISOString(),
-      version_schema: "1.1.0",
-      agente: "AWS_TEXTRACT",
-      confianza_global: 0.75,
-    },
-    header: { departamento: null, municipio: null, centro_votacion: null, jrv: null, codigo_acta: null },
-    resultados: { partidos: [], totales: { validos: null, nulos: null, blancos: null, total_sumado: null } },
-    verificaciones: {
-      suma_partidos_igual_validos: null,
-      suma_global_coherente: null,
-      campos_firma_presentes: null,
-    },
-    observaciones: "Servicio AWS Textract no implementado completamente",
-  }
-}
-
-function generateConsensus(openai: any, google: any, aws: any) {
-  const agents = [openai, google, aws].filter((a) => a !== null)
+function generateConsensus(openaiVision: any, openaiOCR: any, openaiDocument: any) {
+  const agents = [openaiVision, openaiOCR, openaiDocument].filter((a) => a !== null)
 
   if (agents.length < 2) return null
 
-  // Consensus for header fields
   const header: any = {}
   const headerFields = ["departamento", "municipio", "centro_votacion", "jrv", "codigo_acta"]
 
@@ -221,7 +214,6 @@ function generateConsensus(openai: any, google: any, aws: any) {
     header[field] = getMajorityValue(values)
   }
 
-  // Consensus for parties - merge by name and take majority vote counts
   const allParties: any = {}
   agents.forEach((agent) => {
     if (agent.resultados?.partidos) {
@@ -242,7 +234,6 @@ function generateConsensus(openai: any, google: any, aws: any) {
     }))
     .filter((p) => p.votos !== null)
 
-  // Consensus for totals
   const totales: any = {}
   const totalFields = ["validos", "nulos", "blancos", "total_sumado"]
 
@@ -284,7 +275,6 @@ function getMajorityValue(values: any[]): any {
   const entries = Object.entries(counts)
   const maxCount = Math.max(...entries.map(([, count]) => count))
 
-  // Require at least 2 agents to agree
   if (maxCount >= 2) {
     const winner = entries.find(([, count]) => count === maxCount)?.[0]
     return winner || null
@@ -296,7 +286,6 @@ function getMajorityValue(values: any[]): any {
 function getMajorityNumber(values: number[]): number | null {
   if (values.length === 0) return null
 
-  // For numbers, we need exact matches or very close values
   const tolerance = 0
   const groups: { [key: number]: number[] } = {}
 
@@ -317,11 +306,58 @@ function getMajorityNumber(values: number[]): number | null {
   const entries = Object.entries(groups)
   const maxCount = Math.max(...entries.map(([, group]) => group.length))
 
-  // Require at least 2 agents to agree
   if (maxCount >= 2) {
     const winnerGroup = entries.find(([, group]) => group.length === maxCount)?.[1]
     return winnerGroup ? Math.round(winnerGroup.reduce((a, b) => a + b, 0) / winnerGroup.length) : null
   }
 
   return null
+}
+
+function validateAndCleanResult(result: any) {
+  const cleanHeader = {
+    departamento: typeof result.header?.departamento === "string" ? result.header.departamento.trim() : null,
+    municipio: typeof result.header?.municipio === "string" ? result.header.municipio.trim() : null,
+    centro_votacion: typeof result.header?.centro_votacion === "string" ? result.header.centro_votacion.trim() : null,
+    jrv: typeof result.header?.jrv === "string" ? result.header.jrv.trim() : null,
+    codigo_acta: typeof result.header?.codigo_acta === "string" ? result.header.codigo_acta.trim() : null,
+  }
+
+  const cleanPartidos = Array.isArray(result.resultados?.partidos)
+    ? result.resultados.partidos
+        .filter((p: any) => p.nombre && typeof p.votos === "number" && p.votos >= 0)
+        .map((p: any) => ({
+          nombre: p.nombre.trim(),
+          votos: Math.floor(p.votos),
+        }))
+    : []
+
+  const cleanTotales = {
+    validos:
+      typeof result.resultados?.totales?.validos === "number" ? Math.floor(result.resultados.totales.validos) : null,
+    nulos: typeof result.resultados?.totales?.nulos === "number" ? Math.floor(result.resultados.totales.nulos) : null,
+    blancos:
+      typeof result.resultados?.totales?.blancos === "number" ? Math.floor(result.resultados.totales.blancos) : null,
+    total_sumado:
+      typeof result.resultados?.totales?.total_sumado === "number"
+        ? Math.floor(result.resultados.totales.total_sumado)
+        : null,
+  }
+
+  return {
+    header: cleanHeader,
+    resultados: {
+      partidos: cleanPartidos,
+      totales: cleanTotales,
+    },
+  }
+}
+
+function calculateVerifications(data: any) {
+  if (!data.resultados?.partidos || !data.resultados?.totales?.validos) {
+    return null
+  }
+
+  const sumPartidos = data.resultados.partidos.reduce((sum: number, partido: any) => sum + (partido.votos || 0), 0)
+  return sumPartidos === data.resultados.totales.validos
 }
