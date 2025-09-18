@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head>
+  <meta charset="utf-8"><title>Resultado {{filename}}</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head><body>
+  <h2>Archivo: {{filename}}</h2>
+  <nav>
+    <a href="/">Procesar otra</a> ·
+    <a href="/dashboard">Dashboard</a>
+  </nav>
+  <div class="grid">
+    <div><h3>Agente OpenAI</h3><pre>{{A | tojson(indent=2)}}</pre></div>
+    <div><h3>Agente Google DocAI</h3><pre>{{B | tojson(indent=2)}}</pre></div>
+    <div><h3>Agente AWS Textract</h3><pre>{{C | tojson(indent=2)}}</pre></div>
+  </div>
+  <h3>CONSENSO</h3>
+  <pre>{{CONS | tojson(indent=2)}}</pre>
+  <p>
+    Descargas:
+    <a href="/outputs/{{filename}}.OPENAI.json" download>A</a> ·
+    <a href="/outputs/{{filename}}.GCP_DOC_AI.json" download>B</a> ·
+    <a href="/outputs/{{filename}}.AWS_TEXTRACT.json" download>C</a> ·
+    <a href="/outputs/{{filename}}.CONSENSO.json" download>CONSENSO</a>
+  </p>
+</body></html>

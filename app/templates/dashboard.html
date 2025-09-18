@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head>
+  <meta charset="utf-8"><title>Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head><body>
+  <h2>Dashboard — Totales por partido (CONSENSO)</h2>
+  <nav><a href="/">Procesar</a></nav>
+  <table>
+    <thead><tr><th>#</th><th>Partido</th><th>Votos</th></tr></thead>
+    <tbody>
+      {% for i,(name,v) in enumerate(items, start=1) %}
+      <tr><td>{{i}}</td><td>{{name}}</td><td>{{v}}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="small">Suma sobre archivos *.CONSENSO.json en <code>outputs/</code>.</p>
+</body></html>
