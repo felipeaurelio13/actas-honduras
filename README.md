@@ -1,8 +1,14 @@
 # hn-icr-diputados-cloud-v1
 
-`v1.1.1` – Plataforma para el conteo paralelo de **Actas de Cierre – Diputados (Honduras)** utilizando **tres agentes especializados de OpenAI** que se ejecutan en paralelo y generan un consenso automático cuando al menos dos coinciden.
+`v1.2.0` – Plataforma para el conteo paralelo de **Actas de Cierre – Diputados (Honduras)** utilizando **tres agentes especializados de OpenAI** que se ejecutan en paralelo, ahora con tipados estrictos y preparada para despliegues estáticos en GitHub Pages.
 
-## Novedades 1.1.1
+## Novedades 1.2.0
+
+- **Tipados compartidos y validación con Zod:** la API y el frontend utilizan los mismos contratos (`lib/acta-types.ts`) y se valida la respuesta con Zod antes de actualizar el estado, reduciendo errores silenciosos.
+- **Compatibilidad con GitHub Pages:** nuevas fuentes locales (sin dependencias externas) y variable `NEXT_PUBLIC_API_BASE_URL` para conectar con un backend remoto al desplegar la interfaz como sitio estático.
+- **Dashboard más consistente:** cálculos de totales y porcentajes centralizados para el consenso, evitando discrepancias y mejorando la visualización móvil.
+
+### Historial 1.1.1
 
 - Consenso más completo: ahora se fusionan las `tablas_brutas` cuando al menos dos agentes coinciden o, en su defecto, se selecciona la tabla más informativa disponible.
 - Mayor confiabilidad: el consenso calcula una confianza ponderada según los agentes participantes e indica explícitamente qué agentes aportaron al resultado.
@@ -27,7 +33,8 @@
 | Variable | Descripción |
 | --- | --- |
 | `OPENAI_API_KEY` | **Obligatoria.** Clave de OpenAI con permisos de visión estructurada. |
-| `NEXT_PUBLIC_APP_VERSION` | Versión mostrada en el footer (por defecto `v1.1.1`). |
+| `NEXT_PUBLIC_APP_VERSION` | Versión mostrada en el footer (por defecto `v1.2.0`). |
+| `NEXT_PUBLIC_API_BASE_URL` | URL base del backend cuando se despliega la interfaz en modo estático (por ejemplo, un servicio en Railway o FastAPI). Déjalo vacío para usar el API interno de Next.js en desarrollo. |
 | `OPENAI_DEFAULT_MODEL` | Modelo multimodal a usar cuando no se especifique uno por agente (opcional, `gpt-4.1` por defecto). |
 | `OPENAI_VISION_MODEL` | Modelo específico para el agente de inspección visual (opcional). |
 | `OPENAI_OCR_MODEL` | Modelo específico para el agente orientado a OCR (opcional). |
@@ -80,3 +87,10 @@ El servicio se expone en `http://127.0.0.1:8000`, guarda las salidas en `outputs
 - Mantener enfoque *mobile-first* y minimalista en la interfaz.
 - Ejecutar `pnpm lint` antes de subir cambios.
 - Actualizar la versión mostrada en el footer (`NEXT_PUBLIC_APP_VERSION`) y documentar cualquier cambio relevante en este README.
+
+## Despliegue en GitHub Pages
+
+1. **Backend**: GitHub Pages sólo puede servir archivos estáticos. Publica el endpoint `/api/process-acta` en un servicio externo (por ejemplo, desplegando este mismo backend de Next.js en Railway/Render o usando el servicio FastAPI incluido en `app/main.py`). Configura ahí las llaves de OpenAI.
+2. **Variables**: en GitHub establece `NEXT_PUBLIC_API_BASE_URL` apuntando al dominio público del backend (por ejemplo `https://tu-backend.com`). Deja el valor vacío en desarrollo para consumir la API local de Next.js.
+3. **Build estático**: genera la carpeta `out/` habilitando `output: "export"` en una rama de despliegue sólo para la interfaz (sin la carpeta `app/api`). Sigue la guía oficial de Next 14 para exportar sitios estáticos y publica `out/` en la rama que usa GitHub Pages.
+4. **Pruebas**: antes de publicar, ejecuta `pnpm lint` y prueba la carga de un acta en el entorno estático para validar la comunicación con el backend remoto.

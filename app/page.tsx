@@ -2,6 +2,7 @@
 
 import type React from "react"
 import { useState, useCallback, useMemo } from "react"
+import { z } from "zod"
 import { Upload, FileText, BarChart3, CheckCircle, AlertCircle, Clock, Eye, Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -9,19 +10,89 @@ import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { APP_NAME, APP_VERSION, SUPPORT_EMAIL } from "@/lib/app-info"
+import {
+  type ActaPayload,
+  type AgentErrorKey,
+  type AgentPipeline,
+  type ApiResponsePayload,
+  type Partido,
+} from "@/lib/acta-types"
+
+const partidoSchema: z.ZodType<Partido> = z.object({
+  nombre: z.string(),
+  votos: z.number().int().nullable(),
+})
+
+const totalesSchema = z.object({
+  validos: z.number().int().nullable(),
+  nulos: z.number().int().nullable(),
+  blancos: z.number().int().nullable(),
+  total_sumado: z.number().int().nullable(),
+})
+
+const verificacionesSchema = z.object({
+  suma_partidos_igual_validos: z.boolean().nullable(),
+  suma_global_coherente: z.boolean().nullable(),
+  campos_firma_presentes: z.boolean().nullable(),
+})
+
+const actaPayloadSchema: z.ZodType<ActaPayload> = z.object({
+  meta: z.object({
+    nivel: z.string(),
+    pais: z.string(),
+    fuente: z.string(),
+    timestamp_procesamiento: z.string(),
+    version_schema: z.string(),
+    agente: z.string(),
+    confianza_global: z.number(),
+  }),
+  header: z.object({
+    departamento: z.string().nullable(),
+    municipio: z.string().nullable(),
+    centro_votacion: z.string().nullable(),
+    jrv: z.string().nullable(),
+    codigo_acta: z.string().nullable(),
+  }),
+  resultados: z.object({
+    partidos: z.array(partidoSchema),
+    totales: totalesSchema,
+    tablas_brutas: z.array(z.array(z.string())),
+  }),
+  verificaciones: verificacionesSchema,
+  observaciones: z.string().nullable(),
+})
+
+const apiResponseSchema: z.ZodType<ApiResponsePayload> = z.object({
+  openai_vision: actaPayloadSchema.nullable(),
+  openai_vision_error: z.string().nullable(),
+  openai_ocr: actaPayloadSchema.nullable(),
+  openai_ocr_error: z.string().nullable(),
+  openai_document: actaPayloadSchema.nullable(),
+  openai_document_error: z.string().nullable(),
+  consensus: actaPayloadSchema.nullable(),
+})
+
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "")
 
 type AgentKey = "vision" | "ocr" | "document"
 
 type AgentStatus = "processing" | "completed" | "error"
 
-type ApiAgentResultKey = "openai_vision" | "openai_ocr" | "openai_document"
+type ApiAgentResultKey = AgentPipeline
 
-type ApiAgentErrorKey = "openai_vision_error" | "openai_ocr_error" | "openai_document_error"
+type ApiAgentErrorKey = AgentErrorKey
 
 interface AgentResult {
   status: AgentStatus
-  data?: any
+  data?: ActaPayload
   error?: string
+}
+
+interface AgentSnapshot {
+  key: AgentKey
+  data: ActaPayload | null
+  error: string | null
+  success: boolean
 }
 
 type AgentsState = Record<AgentKey, AgentResult>
@@ -32,9 +103,9 @@ interface ProcessingResult {
   status: "processing" | "completed" | "error"
   progress: number
   agents: AgentsState
-  consensus?: any
+  consensus: ActaPayload | null
   uploadedFile?: File
-  debugLogs?: string[] // Added debug logs array
+  debugLogs: string[]
 }
 
 const agentMetadata: Record<AgentKey, { label: string; shortLabel: string; resultKey: ApiAgentResultKey; errorKey: ApiAgentErrorKey }> = {
@@ -71,19 +142,167 @@ export default function HomePage() {
   const [dragActive, setDragActive] = useState(false)
   const [selectedFile, setSelectedFile] = useState<ProcessingResult | null>(null)
 
-  const addDebugLog = (fileId: string, message: string) => {
+  const consensusMetrics = useMemo(() => {
+    if (!selectedFile?.consensus) {
+      return { parties: [] as Partido[], sortedParties: [] as Partido[], totalVotes: 0 }
+    }
+    const parties = selectedFile.consensus.resultados.partidos
+    const totalVotes = parties.reduce((sum, partido) => sum + (partido.votos ?? 0), 0)
+    const sortedParties = [...parties].sort((a, b) => (b.votos ?? 0) - (a.votos ?? 0))
+    return { parties, sortedParties, totalVotes }
+  }, [selectedFile])
+
+  const addDebugLog = useCallback((fileId: string, message: string) => {
     const timestamp = new Date().toLocaleTimeString()
     setFiles((prev) =>
       prev.map((f) =>
         f.id === fileId
           ? {
               ...f,
-              debugLogs: [...(f.debugLogs || []), `[${timestamp}] ${message}`],
+              debugLogs: [...f.debugLogs, `[${timestamp}] ${message}`],
             }
           : f,
       ),
     )
-  }
+  }, [])
+
+  const processWithAI = useCallback(
+    async (fileId: string, file: File) => {
+      try {
+        addDebugLog(fileId, "📤 Preparando archivo para envío...")
+        const formData = new FormData()
+        formData.append("file", file)
+
+        setFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, progress: 10 } : f)))
+        addDebugLog(fileId, "🔄 Enviando a 3 agentes OpenAI en paralelo...")
+
+        const endpoint = `${API_BASE_URL}/api/process-acta`
+        const response = await fetch(endpoint, {
+          method: "POST",
+          body: formData,
+        })
+
+        addDebugLog(fileId, `📡 Respuesta del servidor: ${response.status} ${response.statusText}`)
+
+        if (!response.ok) {
+          const errorText = await response.text()
+          addDebugLog(fileId, `❌ Error HTTP: ${errorText}`)
+          throw new Error(`HTTP error! status: ${response.status} - ${errorText}`)
+        }
+
+        const result = apiResponseSchema.parse(await response.json())
+        addDebugLog(fileId, `📊 Datos recibidos: ${JSON.stringify(Object.keys(result))}`)
+
+        const agentSnapshots: AgentSnapshot[] = agentOrder.map((key) => {
+          const meta = agentMetadata[key]
+          const agentData = result[meta.resultKey]
+          const agentError = result[meta.errorKey]
+          const success = Boolean(agentData) && !agentError
+
+          addDebugLog(fileId, `🤖 ${meta.label}: ${success ? "✅ Éxito" : "❌ Error"}`)
+          if (agentError) {
+            addDebugLog(fileId, `❌ Detalle ${meta.shortLabel}: ${agentError}`)
+          }
+
+          return {
+            key,
+            data: agentData,
+            error: agentError,
+            success,
+          }
+        })
+
+        const consensusPayload = result.consensus
+        if (consensusPayload) {
+          const partidosCount = consensusPayload.resultados.partidos.length
+          const totalVotos = consensusPayload.resultados.partidos.reduce(
+            (sum, partido) => sum + (partido.votos ?? 0),
+            0,
+          )
+          addDebugLog(fileId, `🎯 Consenso generado: ${partidosCount} partidos, ${totalVotos} votos totales`)
+        } else {
+          addDebugLog(fileId, "⚠️ No se pudo generar consenso (menos de 2 agentes exitosos)")
+        }
+
+        const hasSuccess = agentSnapshots.some((snapshot) => snapshot.success)
+
+        setFiles((prev) =>
+          prev.map((f) => {
+            if (f.id !== fileId) return f
+
+            const agents: AgentsState = { ...f.agents }
+            agentSnapshots.forEach((snapshot) => {
+              agents[snapshot.key] = {
+                status: snapshot.success ? "completed" : "error",
+                data: snapshot.data ?? undefined,
+                error: snapshot.error ?? undefined,
+              }
+            })
+
+            return {
+              ...f,
+              status: hasSuccess ? "completed" : "error",
+              progress: hasSuccess ? 100 : 0,
+              agents,
+              consensus: result.consensus,
+            }
+          }),
+        )
+
+        addDebugLog(fileId, "✅ Procesamiento completado exitosamente")
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Error desconocido"
+        const stackSnippet = error instanceof Error && error.stack ? error.stack.substring(0, 200) : null
+        console.error("Error processing file:", error)
+        addDebugLog(fileId, `💥 Error crítico: ${message}`)
+        if (stackSnippet) {
+          addDebugLog(fileId, `🔍 Stack trace: ${stackSnippet}...`)
+        }
+
+        setFiles((prev) =>
+          prev.map((f) => {
+            if (f.id !== fileId) return f
+
+            const agents: AgentsState = { ...f.agents }
+            agentOrder.forEach((key) => {
+              agents[key] = { status: "error", error: message }
+            })
+
+            return {
+              ...f,
+              status: "error",
+              progress: 0,
+              consensus: null,
+              agents,
+            }
+          }),
+        )
+      }
+    },
+    [addDebugLog],
+  )
+
+  const processFiles = useCallback(
+    async (fileList: File[]) => {
+      for (const file of fileList) {
+        const newFile: ProcessingResult = {
+          id: Math.random().toString(36).slice(2, 11),
+          filename: file.name,
+          status: "processing",
+          progress: 0,
+          uploadedFile: file,
+          debugLogs: [],
+          consensus: null,
+          agents: createInitialAgentsState(),
+        }
+
+        setFiles((prev) => [...prev, newFile])
+        addDebugLog(newFile.id, `🚀 Iniciando procesamiento de ${file.name} (${(file.size / 1024).toFixed(1)}KB)`)
+        await processWithAI(newFile.id, file)
+      }
+    },
+    [addDebugLog, processWithAI],
+  )
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -95,145 +314,29 @@ export default function HomePage() {
     }
   }, [])
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setDragActive(false)
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      setDragActive(false)
 
-    const droppedFiles = Array.from(e.dataTransfer.files).filter(
-      (file) => file.type.startsWith("image/") || file.type === "application/pdf",
-    )
-    processFiles(droppedFiles)
-  }, [])
-
-  const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      const selectedFiles = Array.from(e.target.files)
-      processFiles(selectedFiles)
-    }
-  }, [])
-
-  const processFiles = async (fileList: File[]) => {
-    for (const file of fileList) {
-      const newFile: ProcessingResult = {
-        id: Math.random().toString(36).slice(2, 11),
-        filename: file.name,
-        status: "processing",
-        progress: 0,
-        uploadedFile: file,
-        debugLogs: [],
-        agents: createInitialAgentsState(),
-      }
-
-      setFiles((prev) => [...prev, newFile])
-      addDebugLog(newFile.id, `🚀 Iniciando procesamiento de ${file.name} (${(file.size / 1024).toFixed(1)}KB)`)
-      await processWithAI(newFile.id, file)
-    }
-  }
-
-  const processWithAI = async (fileId: string, file: File) => {
-    try {
-      addDebugLog(fileId, "📤 Preparando archivo para envío...")
-      const formData = new FormData()
-      formData.append("file", file)
-
-      // Update progress as agents start
-      setFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, progress: 10 } : f)))
-      addDebugLog(fileId, "🔄 Enviando a 3 agentes OpenAI en paralelo...")
-
-      // Process with all three agents in parallel
-      const response = await fetch("/api/process-acta", {
-        method: "POST",
-        body: formData,
-      })
-
-      addDebugLog(fileId, `📡 Respuesta del servidor: ${response.status} ${response.statusText}`)
-
-      if (!response.ok) {
-        const errorText = await response.text()
-        addDebugLog(fileId, `❌ Error HTTP: ${errorText}`)
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`)
-      }
-
-      const result = await response.json()
-      addDebugLog(fileId, `📊 Datos recibidos: ${JSON.stringify(Object.keys(result))}`)
-
-      const agentSnapshots = agentOrder.map((key) => {
-        const meta = agentMetadata[key]
-        const agentData = result?.[meta.resultKey] ?? null
-        const agentError = result?.[meta.errorKey] ?? null
-        const success = Boolean(agentData) && !agentError
-
-        addDebugLog(fileId, `🤖 ${meta.label}: ${success ? "✅ Éxito" : "❌ Error"}`)
-        if (agentError) {
-          addDebugLog(fileId, `❌ Detalle ${meta.shortLabel}: ${agentError}`)
-        }
-
-        return {
-          key,
-          data: agentData,
-          error: agentError as string | null,
-          success,
-        }
-      })
-
-      if (result.consensus) {
-        const partidosCount = result.consensus.resultados?.partidos?.length || 0
-        const totalVotos =
-          result.consensus.resultados?.partidos?.reduce((sum: number, p: any) => sum + (p.votos || 0), 0) || 0
-        addDebugLog(fileId, `🎯 Consenso generado: ${partidosCount} partidos, ${totalVotos} votos totales`)
-      } else {
-        addDebugLog(fileId, "⚠️ No se pudo generar consenso (menos de 2 agentes exitosos)")
-      }
-
-      const hasSuccess = agentSnapshots.some((snapshot) => snapshot.success)
-
-      setFiles((prev) =>
-        prev.map((f) => {
-          if (f.id !== fileId) return f
-
-          const agents = agentSnapshots.reduce((acc, snapshot) => {
-            acc[snapshot.key] = {
-              status: snapshot.success ? "completed" : "error",
-              data: snapshot.data ?? undefined,
-              error: snapshot.error ?? undefined,
-            }
-            return acc
-          }, {} as AgentsState)
-
-          return {
-            ...f,
-            status: hasSuccess ? "completed" : "error",
-            progress: hasSuccess ? 100 : 0,
-            agents,
-            consensus: result.consensus,
-          }
-        }),
+      const droppedFiles = Array.from(e.dataTransfer.files).filter(
+        (file) => file.type.startsWith("image/") || file.type === "application/pdf",
       )
+      void processFiles(droppedFiles)
+    },
+    [processFiles],
+  )
 
-      addDebugLog(fileId, "✅ Procesamiento completado exitosamente")
-    } catch (error: any) {
-      console.error("Error processing file:", error)
-      addDebugLog(fileId, `💥 Error crítico: ${error.message}`)
-      addDebugLog(fileId, `🔍 Stack trace: ${error.stack?.substring(0, 200)}...`)
-
-      setFiles((prev) =>
-        prev.map((f) =>
-          f.id === fileId
-            ? {
-                ...f,
-                status: "error",
-                progress: 0,
-                agents: agentOrder.reduce((acc, key) => {
-                  acc[key] = { status: "error", error: error.message }
-                  return acc
-                }, {} as AgentsState),
-              }
-            : f,
-        ),
-      )
-    }
-  }
+  const handleFileInput = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (e.target.files) {
+        const selectedFiles = Array.from(e.target.files)
+        void processFiles(selectedFiles)
+      }
+    },
+    [processFiles],
+  )
 
   const getAgentStatusIcon = (status: AgentStatus) => {
     switch (status) {
@@ -272,23 +375,19 @@ export default function HomePage() {
     URL.revokeObjectURL(url)
   }
 
-  const totalVotes = useMemo(
-    () =>
-      files
-        .filter((f) => f.consensus?.resultados?.partidos)
-        .reduce(
-          (acc, file) => {
-            file.consensus.resultados.partidos.forEach((partido: any) => {
-              if (typeof partido.votos === "number") {
-                acc[partido.nombre] = (acc[partido.nombre] || 0) + partido.votos
-              }
-            })
-            return acc
-          },
-          {} as { [partido: string]: number },
-        ),
-    [files],
-  )
+  const totalVotes = useMemo(() => {
+    return files.reduce<Record<string, number>>((acc, file) => {
+      if (!file.consensus) {
+        return acc
+      }
+      file.consensus.resultados.partidos.forEach((partido) => {
+        if (typeof partido.votos === "number") {
+          acc[partido.nombre] = (acc[partido.nombre] ?? 0) + partido.votos
+        }
+      })
+      return acc
+    }, {})
+  }, [files])
 
   return (
     <div className="min-h-screen bg-background">
@@ -483,7 +582,7 @@ export default function HomePage() {
                       const partidos = Array.isArray(agent.data?.resultados?.partidos)
                         ? agent.data.resultados.partidos
                         : []
-                      const totalVotos = partidos.reduce((sum: number, partido: any) => sum + (partido?.votos || 0), 0)
+                      const totalVotos = partidos.reduce((sum, partido) => sum + (partido.votos ?? 0), 0)
 
                       let content
                       if (agent.status === "completed") {
@@ -560,14 +659,10 @@ export default function HomePage() {
                             <strong>JRV:</strong> {selectedFile.consensus.header?.jrv || "No consenso"}
                           </p>
                           <p>
-                            <strong>Partidos:</strong> {selectedFile.consensus.resultados?.partidos?.length || 0}
+                            <strong>Partidos:</strong> {consensusMetrics.parties.length}
                           </p>
                           <p className="font-medium text-primary">
-                            <strong>Total Votos:</strong>{" "}
-                            {selectedFile.consensus.resultados?.partidos?.reduce(
-                              (sum: number, p: any) => sum + (typeof p.votos === "number" ? p.votos : 0),
-                              0,
-                            ) || 0}
+                            <strong>Total Votos:</strong> {consensusMetrics.totalVotes}
                           </p>
                           <p className="text-green-600 font-medium">✓ Validado por ≥2 agentes</p>
                         </div>
@@ -580,7 +675,7 @@ export default function HomePage() {
                     </div>
                   </div>
 
-                  {selectedFile.consensus && selectedFile.consensus.resultados?.partidos?.length > 0 && (
+                  {selectedFile.consensus && consensusMetrics.parties.length > 0 && (
                     <div className="mb-4">
                       <h5 className="font-medium mb-2">Desglose por Partido (Consenso)</h5>
                       <div className="border rounded-lg overflow-hidden">
@@ -593,25 +688,21 @@ export default function HomePage() {
                             </tr>
                           </thead>
                           <tbody>
-                            {selectedFile.consensus.resultados.partidos
-                              .sort((a: any, b: any) => (b.votos || 0) - (a.votos || 0))
-                              .map((partido: any, index: number) => {
-                                const totalVotos = selectedFile.consensus.resultados.partidos.reduce(
-                                  (sum: number, p: any) => sum + (p.votos || 0),
-                                  0,
-                                )
-                                const percentage =
-                                  totalVotos > 0 ? (((partido.votos || 0) / totalVotos) * 100).toFixed(1) : "0.0"
-                                return (
-                                  <tr key={index} className="border-t">
-                                    <td className="p-2 font-medium">{partido.nombre}</td>
-                                    <td className="p-2 text-right font-mono">
-                                      {(partido.votos || 0).toLocaleString()}
-                                    </td>
-                                    <td className="p-2 text-right text-muted-foreground">{percentage}%</td>
-                                  </tr>
-                                )
-                              })}
+                            {consensusMetrics.sortedParties.map((partido, index) => {
+                              const percentage =
+                                consensusMetrics.totalVotes > 0
+                                  ? (((partido.votos ?? 0) / consensusMetrics.totalVotes) * 100).toFixed(1)
+                                  : "0.0"
+                              return (
+                                <tr key={index} className="border-t">
+                                  <td className="p-2 font-medium">{partido.nombre}</td>
+                                  <td className="p-2 text-right font-mono">
+                                    {(partido.votos ?? 0).toLocaleString()}
+                                  </td>
+                                  <td className="p-2 text-right text-muted-foreground">{percentage}%</td>
+                                </tr>
+                              )
+                            })}
                           </tbody>
                         </table>
                       </div>
