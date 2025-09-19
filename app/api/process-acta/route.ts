@@ -1,74 +1,22 @@
 import { type NextRequest, NextResponse } from "next/server"
 import OpenAI from "openai"
 
+import {
+  AGENT_PIPELINES,
+  type ActaPayload,
+  type AgentErrorKey,
+  type AgentPipeline,
+  type ApiResponsePayload,
+  type Header,
+  type LimpiadorActa,
+  type Partido,
+  type Totales,
+  type Verificaciones,
+} from "@/lib/acta-types"
+
 export const runtime = "nodejs"
 
-const AGENT_PIPELINES = ["openai_vision", "openai_ocr", "openai_document"] as const
-
-const SCHEMA_VERSION = "1.1.1"
-
-type AgentPipeline = (typeof AGENT_PIPELINES)[number]
-type AgentErrorKey = `${AgentPipeline}_error`
-
-type NullableString = string | null
-
-type Header = {
-  departamento: NullableString
-  municipio: NullableString
-  centro_votacion: NullableString
-  jrv: NullableString
-  codigo_acta: NullableString
-}
-
-type Totales = {
-  validos: number | null
-  nulos: number | null
-  blancos: number | null
-  total_sumado: number | null
-}
-
-type Partido = {
-  nombre: string
-  votos: number | null
-}
-
-type LimpiadorActa = {
-  header: Header
-  resultados: {
-    partidos: Partido[]
-    totales: Totales
-    tablas_brutas: string[][]
-  }
-}
-
-type Verificaciones = {
-  suma_partidos_igual_validos: boolean | null
-  suma_global_coherente: boolean | null
-  campos_firma_presentes: boolean | null
-}
-
-export type ActaPayload = {
-  meta: {
-    nivel: string
-    pais: string
-    fuente: string
-    timestamp_procesamiento: string
-    version_schema: string
-    agente: string
-    confianza_global: number
-  }
-  header: Header
-  resultados: {
-    partidos: Partido[]
-    totales: Totales
-    tablas_brutas: string[][]
-  }
-  verificaciones: Verificaciones
-  observaciones: string | null
-}
-
-type ApiResponsePayload = Record<AgentPipeline, ActaPayload | null> &
-  Record<AgentErrorKey, string | null> & { consensus: ActaPayload | null }
+const SCHEMA_VERSION = "1.2.0"
 
 const OPENAI_ACTA_SCHEMA = {
   name: "ActaDiputados",
@@ -215,15 +163,12 @@ export async function POST(request: NextRequest) {
 }
 
 function createBaseResponse(): ApiResponsePayload {
-  return {
-    openai_vision: null,
-    openai_vision_error: null,
-    openai_ocr: null,
-    openai_ocr_error: null,
-    openai_document: null,
-    openai_document_error: null,
-    consensus: null,
-  } as ApiResponsePayload
+  const base: Partial<ApiResponsePayload> = { consensus: null }
+  AGENT_PIPELINES.forEach((pipeline) => {
+    base[pipeline] = null
+    base[`${pipeline}_error` as AgentErrorKey] = null
+  })
+  return base as ApiResponsePayload
 }
 
 function resolveModel(agentKey: AgentPipeline): string {
@@ -297,8 +242,19 @@ async function processWithOpenAI(
   }
 }
 
+type UnknownRecord = Record<string, unknown>
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 function extractResponseText(response: unknown): string {
-  const outputText = (response as any)?.output_text
+  const typedResponse = response as {
+    output_text?: string | string[]
+    output?: Array<{ content?: Array<{ text?: string }> | undefined } | undefined>
+  }
+
+  const outputText = typedResponse.output_text
   if (typeof outputText === "string" && outputText.trim().length > 0) {
     return outputText
   }
@@ -310,7 +266,7 @@ function extractResponseText(response: unknown): string {
     }
   }
 
-  const outputItems = (response as any)?.output
+  const outputItems = typedResponse.output
   if (Array.isArray(outputItems)) {
     for (const item of outputItems) {
       const content = item?.content
@@ -352,33 +308,41 @@ function sanitizeTable(table: unknown): string[] {
   return table.map((cell) => (typeof cell === "string" ? cell.trim() : ""))
 }
 
-function validateAndCleanResult(raw: any): LimpiadorActa {
+function validateAndCleanResult(raw: unknown): LimpiadorActa {
+  const rawRecord = isRecord(raw) ? raw : {}
+  const rawHeader = isRecord(rawRecord.header) ? rawRecord.header : {}
+  const rawResultados = isRecord(rawRecord.resultados) ? rawRecord.resultados : {}
+  const rawTotales = isRecord(rawResultados["totales"]) ? (rawResultados["totales"] as UnknownRecord) : {}
+
   const header: Header = {
-    departamento: sanitizeText(raw?.header?.departamento),
-    municipio: sanitizeText(raw?.header?.municipio),
-    centro_votacion: sanitizeText(raw?.header?.centro_votacion),
-    jrv: sanitizeText(raw?.header?.jrv),
-    codigo_acta: sanitizeText(raw?.header?.codigo_acta),
+    departamento: sanitizeText(rawHeader["departamento"]),
+    municipio: sanitizeText(rawHeader["municipio"]),
+    centro_votacion: sanitizeText(rawHeader["centro_votacion"]),
+    jrv: sanitizeText(rawHeader["jrv"]),
+    codigo_acta: sanitizeText(rawHeader["codigo_acta"]),
   }
 
-  const partidos: Partido[] = Array.isArray(raw?.resultados?.partidos)
-    ? raw.resultados.partidos
-        .map((partido: any) => {
-          const nombre = sanitizeText(partido?.nombre)
-          if (!nombre) return null
-          return {
-            nombre,
-            votos: toInt(partido?.votos),
-          }
-        })
-        .filter((partido: Partido | null): partido is Partido => partido !== null)
+  const rawPartidos = Array.isArray(rawResultados["partidos"])
+    ? (rawResultados["partidos"] as unknown[])
     : []
 
+  const partidos: Partido[] = rawPartidos
+    .map((partido) => {
+      if (!isRecord(partido)) return null
+      const nombre = sanitizeText(partido["nombre"])
+      if (!nombre) return null
+      return {
+        nombre,
+        votos: toInt(partido["votos"]),
+      }
+    })
+    .filter((partido): partido is Partido => partido !== null)
+
   const totales: Totales = {
-    validos: toInt(raw?.resultados?.totales?.validos),
-    nulos: toInt(raw?.resultados?.totales?.nulos),
-    blancos: toInt(raw?.resultados?.totales?.blancos),
-    total_sumado: toInt(raw?.resultados?.totales?.total_sumado),
+    validos: toInt(rawTotales["validos"]),
+    nulos: toInt(rawTotales["nulos"]),
+    blancos: toInt(rawTotales["blancos"]),
+    total_sumado: toInt(rawTotales["total_sumado"]),
   }
 
   if (
@@ -390,11 +354,13 @@ function validateAndCleanResult(raw: any): LimpiadorActa {
     totales.total_sumado = totales.validos + totales.nulos + totales.blancos
   }
 
-  const tablas_brutas: string[][] = Array.isArray(raw?.resultados?.tablas_brutas)
-    ? raw.resultados.tablas_brutas
-        .map((row: unknown) => sanitizeTable(row))
-        .filter((row: string[]) => row.some((cell) => cell.length > 0))
+  const rawTablas = Array.isArray(rawResultados["tablas_brutas"])
+    ? (rawResultados["tablas_brutas"] as unknown[])
     : []
+
+  const tablas_brutas: string[][] = rawTablas
+    .map((row) => sanitizeTable(row))
+    .filter((row) => row.some((cell) => cell.length > 0))
 
   return {
     header,
@@ -693,7 +659,7 @@ function toErrorMessage(error: unknown): string {
   }
   try {
     return JSON.stringify(error)
-  } catch (serializationError) {
+  } catch {
     return "Error desconocido"
   }
 }
